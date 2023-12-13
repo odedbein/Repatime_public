@@ -1,0 +1,695 @@
+---
+title: "Repatime_rsa_analyses"
+output: html_document
+---
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+# set up
+```{r setup, include=FALSE,  cache = FALSE, warning = TRUE, message = TRUE, error = TRUE}
+
+# clear workspace
+rm(list = ls())
+
+
+#data
+results_dir <- "/Users/oded/princeton_gdrive/DAVACHI_LAB/Repatime/Rfiles_data_for_JNeuro/behavior"
+model_output_dir <- file.path(results_dir,'mixed_models_outputs')
+
+knitr::opts_knit$set(root.dir = results_dir)
+library(tidyverse)
+library(Matrix)
+library(lme4)
+library(effsize)
+library(ggplot2)
+library(knitr)
+library(reshape)
+library(standardize)
+library(optimx)
+library(dfoptim)
+library(ggpubr)
+library(gridExtra) #that's for the grid.arrange
+
+#these we need for ploting models predictions
+library(ggeffects)
+library(sjPlot)
+library(sjmisc)
+library(sjstats)
+
+#Create a custom color scale
+library(RColorBrewer)
+#to view the paletts:
+#display.brewer.all(5)
+#repetition colors - adapted:
+repetition_colors <- c(rgb(1,	0.807843137254902,	0.823529411764706),
+                       rgb(0.886274509803922,	0.305882352941177,	0.320588235294118),
+                       rgb(0.772549019607843,	0.203921568627451,	0.217647058823529),
+                       rgb(0.658823529411765,	0.101960784313725,	0.114705882352941),
+                       rgb(0.35098039215686,	0,	0.0057647058823529))
+
+#names(repetition_colors) <- unique(curr_data$repetition)
+
+############# set up themes:
+theme_gap <- theme_classic() +
+  theme(panel.border = element_rect(color = "black", fill = NA, size = 1),
+        axis.title.x = element_text(size = 22),
+        axis.text.x = element_text(size = 14),
+        axis.title.y = element_text(size = 22),
+        strip.text = element_text(size = 16),
+        title = element_text(size = 22),
+        legend.text = element_text(size = 14))
+
+theme_all_gaps <- theme_classic() +
+  theme(panel.border = element_rect(color = "black", fill = NA, size = 1),
+        axis.title.x = element_text(size = 26),
+        axis.text.x = element_text(size = 14),
+        axis.title.y = element_text(size = 26),
+        strip.text = element_text(size = 18),
+        title = element_text(size = 22),
+        legend.text = element_text(size = 18),
+        legend.title = element_blank(),
+        legend.position = c(0.8, 0.2),
+        legend.background = element_rect(fill= rgb(0.9,0.9,0.9)))
+
+theme_TestRTcorr <- theme_classic() +
+  theme(axis.title.x = element_text(size = 20),
+        axis.text.x = element_text(size = 12),
+        axis.title.y = element_text(size = 16),
+        strip.text = element_text(size = 16),
+        title = element_text(size = 20),
+        plot.title = element_text(hjust = 0.5))
+
+```
+
+#DEFINE FUNCTIONS
+```{r define functions}
+#This was added for JNeuro revision:
+
+reach_convergence <- function(mdl1) {
+mdl2 = mdl1
+x <- 1
+while (length(mdl2@optinfo$conv$lme4) > 0) {
+  print(sprintf('start estimating model iteration %d',x))
+  pars = getME(mdl2,c("theta","fixef"))
+  mdl2 <-
+    update(mdl2,
+           start = pars,
+           control = glmerControl(optCtrl = list(maxfun = 1e5)))
+  x <- x+1
+  if (x > 10) {
+    break
+  }
+}
+
+max(
+  abs(
+    with(
+      mdl2@optinfo$derivs, solve(Hessian, gradient)
+    )
+  )
+)
+
+return(mdl2)
+
+}
+```
+# load data
+```{r load data}
+
+setwd(results_dir)
+
+#"model_and_TemporalTest_quick100ms_RTms.txt"
+
+model_encRT_data <- read.table(paste(results_dir, "model_and_encoding_RTms.txt", sep="/"),header = TRUE,sep = "\t",dec = ".")
+model_TempTestRT_data <- read.table(paste(results_dir, "model_and_TemporalTest_quick100ms_RTms.txt", sep="/"),header = TRUE,sep = "\t",dec = ".")
+
+```
+
+# list learning RTs
+### set up the data
+```{r set up the data}
+fc_rep <- 0 #
+
+#first, let's figure out how many responses were removed, across all responses (need to combine togeteth the first/secondRT, bc secondRT doesn't have the first response, and firstRT doesn't have the last one.)
+data1 <- model_encRT_data %>%
+  select(c(subject,trials,first_rawRT)) %>%  
+  mutate(RTs = first_rawRT) %>%
+  select(-first_rawRT)
+
+#take the 24th item - we don't have it.
+data2 <- model_encRT_data %>%
+  select(c(subject,trials,second_rawRT)) %>%
+  filter(trials == 23) %>%
+  mutate(trials = trials + 1,
+         RTs = second_rawRT) %>%
+  select(-second_rawRT)
+
+data1 <- bind_rows(data1,data2)
+
+#filter Nan:
+behav_data <- filter(data1,!is.na(data1$RTs))
+
+#calculate the number of nans:
+n=length(unique(behav_data$subject))
+tot_nan=length(data1$RTs) - length(behav_data$RTs)
+#by participant:
+#av_nan_per=(tot_nan/n)/(24*5*6)*100 #number of items, by number of lists by nubmer of reps
+#this is not good - it includes the na for the first item. I report in the paper the number from the matlab code - calc_av_nan_per_subj
+#print(sprintf("av. percentage of nans per subject: %.2f",av_nan_per))
+
+
+
+# analyse the raw RTs:
+behav_data <- model_encRT_data
+behav_data <- behav_data %>%
+  mutate(fac_list = factor(behav_data$list),
+        num_list = behav_data$list,
+        subID = factor(behav_data$subject),
+        scaled_RT = scale(behav_data$second_rawRT, center = FALSE),
+  #I took the second position RT because that reomves the first RT in each list, and take all of the other RTs.
+        UNscaled_RT = behav_data$second_rawRT,
+        #change the numbers in pos_first_in_corr_pair
+        pos_RT = pos_first_in_corr_pair + 1,
+        trials = trials + 1)
+
+behav_data <- behav_data %>%
+mutate(pos_RT = if_else(pos_RT == 5,1,pos_RT))
+
+behav_data <- behav_data %>%
+  mutate(fac_pos = factor(pos_RT),
+         sc_TrialOrderAll = scale(behav_data$trials))
+
+if (fc_rep == 1) {
+behav_data <- behav_data %>%
+  mutate(fac_rep = factor(behav_data$repetition))
+} else {
+  behav_data <- behav_data %>%
+  mutate(fac_rep = scale(behav_data$repetition))
+}
+
+#save it
+all_data <- behav_data
+#behav_data <- all_data
+#select relevant columns:
+behav_data <- behav_data %>%
+  select(c(subID,trials,sc_TrialOrderAll,pos_RT,fac_list,fac_rep,repetition,num_list,scaled_RT,UNscaled_RT,across_event))
+
+#filter Nan:
+behav_data <- filter(behav_data,!is.na(behav_data$scaled_RT))
+# 
+# #calculate the number of nans: This is from the items excluding the first item - in the dissertation chapter I reported the above meausre - makes more sense. Also, since the outliers were removed based on all responses.
+# n=length(unique(behav_data$subID))
+# tot_nan=length(all_data$scaled_RT) - length(behav_data$scaled_RT)
+# #by participant:
+# av_nan_per=(tot_nan/n)/(23*5*6)*100 #number of items (23 since the first item is out), by number of lists by nubmer of reps
+# 
+# print(sprintf("av. percentage of nans per subject: %.2f",av_nan_per))
+
+#plot to see that the distribution indeed fits the inverse gaussian - it does
+b <- ggplot(behav_data, aes(x=scaled_RT)) + 
+  geom_histogram() + 
+  theme_bw() + facet_grid(repetition~fac_list)
+print(b)
+
+# b <- ggplot(curr_rep_data, aes(x=scaled_RT)) + 
+#   geom_histogram() + 
+#   theme_bw() + facet_grid(repetition~fac_list)
+# print(b)
+
+```
+### run gLMM models
+```{r run gLMM models}
+#### start with scaled data - the random intercepts are more meaningful, less convergence problems.
+
+#,control = glmerControl(optimizer = "bobyqa")
+
+## test for the effect of repetition
+null_mdl=glmer(scaled_RT ~ across_event + fac_list +  (1|subID),data = behav_data, family = inverse.gaussian(link = 'identity'))
+
+full_mdl=glmer(scaled_RT ~ fac_rep + across_event + fac_list +  (1|subID),data = behav_data, family = inverse.gaussian(link = 'identity'))
+
+summary(full_mdl)
+print(anova(full_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(full_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+
+## test for the effect of boundary
+null_mdl=glmer(scaled_RT ~ fac_rep + fac_list +  (1|subID),data = behav_data, family = inverse.gaussian(link = 'identity'))
+
+full_mdl=glmer(scaled_RT ~ fac_rep + across_event + fac_list +  (1|subID),data = behav_data, family = inverse.gaussian(link = 'identity'))
+
+summary(full_mdl)
+print(anova(full_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(full_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+
+
+## test for the interaction of boundary effect by repetition:
+null_mdl=glmer(scaled_RT ~ fac_rep + across_event + fac_list +  (1|subID),data = behav_data, family = inverse.gaussian(link = 'identity'))
+
+full_mdl=glmer(scaled_RT ~ fac_rep * across_event + fac_list +  (1|subID),data = behav_data, family = inverse.gaussian(link = 'identity'))
+
+summary(full_mdl)
+print(anova(full_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(full_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+
+#,control = glmerControl(optimizer = "bobyqa",optCtrl = list(maxfun = 100000))
+
+for (r in 1:5) {
+    #note that the null model for Rep3 for some reason doesn't converge. Doesn't matter much, it's something with the random intercept (bc removing the subID didn't work). I tried different optimizers etc, didn't work. so, I left it. many times it doesn't matter much...
+    print(sprintf("#### REP %d: the boundary effect: #####",r))
+    curr_rep_data <- filter(behav_data,behav_data$repetition == r)
+    
+    ## test for the effect of boundary
+    null_mdl=glmer(scaled_RT ~ fac_list + (1|subID),data = curr_rep_data, family = inverse.gaussian(link = 'identity'))
+    #for rep3 it did not converge, I ran this, by hand, not in a loop:
+    #I followed this: https://m-clark.github.io/posts/2020-03-16-convergence/
+    #If doesn't work, try restarting:
+    new_null_mdl <- reach_convergence(null_mdl)
+
+    #if doesn't work, try all optimizers
+    diff_optims <- allFit(null_mdl, maxfun = 1e5)
+
+
+    full_mdl=glmer(scaled_RT ~ across_event + fac_list +  (1|subID),data = curr_rep_data, family = inverse.gaussian(link = 'identity'))
+    
+    
+    summary(full_mdl)
+    print(anova(full_mdl,null_mdl))
+    AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(full_mdl)[2])
+    print(sprintf("AIC diff: %.2f",AIC_diff))
+
+    
+}
+
+##### rep3 did not converge, run ttest: ######
+
+#set up the data
+r=3
+print(sprintf("#### REP %d: the boundary effect t-test: #####",r))
+curr_rep_data <- filter(behav_data,behav_data$repetition == r)
+#average per participant:
+curr_data_average <- curr_rep_data %>%
+               group_by(subID,across_event) %>%
+  summarize(scaled_RT = mean(scaled_RT, na.rm = TRUE))
+
+boundary <- curr_data_average %>%
+  filter(across_event == 1)
+nb <-  curr_data_average %>%
+  filter(across_event == 0)
+#these 2 are identical, just double-checked the code:
+res1 <- t.test(scaled_RT ~ across_event, data = curr_data_average, paired = TRUE)
+res2 <- t.test(boundary$scaled_RT, nb$scaled_RT, paired = TRUE)
+
+
+```
+
+### JNeuro revision: run gLMM models with full random effects
+```{r run gLMM models}
+#### start with scaled data - the random intercepts are more meaningful, less convergence problems.
+#for JNeuro revision, they asked to check more complex models.
+#Generally, they did not converge. here is what I did:
+
+#,control = glmerControl(optimizer = "bobyqa")
+sc_params <- 0
+
+if (sc_params == 1) {
+  behav_data <- behav_data %>%
+  mutate(across_event = scale(across_event))
+}
+## test for the effect of repetition
+null_mdl=glmer(scaled_RT ~ across_event + fac_list +  (1|subID),data = behav_data, family = inverse.gaussian(link = 'identity'))
+
+full_mdl=glmer(scaled_RT ~ fac_rep + across_event + fac_list +  (fac_rep + across_event + fac_list + 1|subID),data = behav_data, family = inverse.gaussian(link = 'identity'),
+               control = glmerControl(optCtrl = list(maxfun = 1e5)))
+
+#save the model for later (make sure folders exist):
+saveRDS(full_mdl, file = file.path(model_output_dir,'learning','rep_and_boundary_effect_default.rda'))
+#to load:
+#model_old = readRDS(file = file.path(model_output_dir,'learning','rep_boundary_int_default.rda'))
+
+
+#I followed this: https://m-clark.github.io/posts/2020-03-16-convergence/
+#If doesn't work, try restarting:
+new_full_mdl <- reach_convergence(full_mdl)
+saveRDS(new_full_mdl, file = file.path(model_output_dir,'learning','rep_and_boundary_effect_after_iteration.rda'))
+
+#if doesn't work, try all optimizers
+diff_optims <- allFit(full_mdl, maxfun = 1e5)
+saveRDS(diff_optims, file = file.path(model_output_dir,'learning','rep_and_boundary_effect_diff_optims.rda'))
+
+summary(full_mdl)
+print(anova(full_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(full_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+
+## test for the effect of boundary
+null_mdl=glmer(scaled_RT ~ fac_rep + fac_list +  (1|subID),data = behav_data, family = inverse.gaussian(link = 'identity'))
+
+full_mdl=glmer(scaled_RT ~ fac_rep + across_event + fac_list +  (1|subID),data = behav_data, family = inverse.gaussian(link = 'identity'))
+
+summary(full_mdl)
+print(anova(full_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(full_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+
+
+## test for the interaction of boundary effect by repetition:
+null_mdl=glmer(scaled_RT ~ fac_rep + across_event + fac_list +  (1|subID),data = behav_data, family = inverse.gaussian(link = 'identity'))
+
+#First try maximal model:
+full_mdl=glmer(scaled_RT ~ fac_rep * across_event + fac_list +  (fac_rep * across_event + fac_list+1|subID),data = behav_data, family = inverse.gaussian(link = 'identity'),
+               control = glmerControl(optCtrl = list(maxfun = 1e5)))
+
+#save the model for later (make sure folders exist):
+saveRDS(full_mdl, file = file.path(model_output_dir,'learning','rep_boundary_int_default.rda'))
+#to load:
+#model_old = readRDS(file = file.path(model_output_dir,'learning','rep_boundary_int_default.rda'))
+summary(full_mdl)
+
+#I followed this: https://m-clark.github.io/posts/2020-03-16-convergence/
+#If doesn't work, try restarting:
+new_full_mdl <- reach_convergence(full_mdl)
+
+#if doesn't work, try all optimizers
+diff_optims <- allFit(full_mdl, maxfun = 1e5)
+
+
+print(anova(full_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(full_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+
+#,control = glmerControl(optimizer = "bobyqa",optCtrl = list(maxfun = 100000))
+for (r in 1:5) {
+  ## I RAN ONE REP BY ONE, NOT AS A LOOP
+    #note that the null model for Rep3 for some reason doesn't converge. Doesn't matter much, it's something with the random intercept (bc removing the subID didn't work). I tried different optimizers etc, didn't work. so, I left it. many times it doesn't matter much...
+    curr_rep_data <- filter(behav_data,behav_data$repetition == r)
+    
+    ## test for the effect of boundary
+    null_mdl=glmer(scaled_RT ~ (1|subID),data = curr_rep_data, family = inverse.gaussian(link = 'identity'))
+    
+    full_mdl=glmer(scaled_RT ~ across_event + fac_list +  (across_event + fac_list + 1|subID),data = curr_rep_data, family = inverse.gaussian(link = 'identity'))
+    
+    #save the model for later (make sure folders exist):
+    saveRDS(full_mdl, file = file.path(model_output_dir,'learning','rep5_boundary_default.rda'))
+    
+    #I followed this: https://m-clark.github.io/posts/2020-03-16-convergence/
+    #If doesn't work, try restarting:
+    new_full_mdl <- reach_convergence(full_mdl)
+    
+    saveRDS(new_full_mdl, file = file.path(model_output_dir,'learning','rep5_boundary_effect_after_iteration.rda'))
+
+    #if doesn't work, try all optimizers
+    #I took default model if convergence did not improve.
+    diff_optims <- allFit(full_mdl, maxfun = 1e5)
+    saveRDS(diff_optims, file = file.path(model_output_dir,'learning','rep5_boundary_effect_diff_optims_on_full_mdl_default.rda'))
+
+
+
+    print(sprintf("#### REP %d: the boundary effect: #####",r))
+    summary(full_mdl)
+    print(anova(full_mdl,null_mdl))
+    AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(full_mdl)[2])
+    print(sprintf("AIC diff: %.2f",AIC_diff))
+
+    
+}
+
+```
+### plot encoding RTs
+```{r plot encoding RTs}
+
+labels_rep <- c(
+  "1" = "Rep1",
+  "2" = "Rep2",
+  "3" = "Rep3",
+  "4" = "Rep4",
+  "5" = "Rep5"
+)
+
+all_spectral<-brewer.pal(9,"Greys")
+myspec_grey <-all_spectral[c(4,5,6,7,9)] #greys
+behav_data <- behav_data %>%
+  mutate(fac_rep = factor(behav_data$repetition))
+#scale_color_manual(values = myspec_grey) +
+## summarise to plot:
+all_pos_RT <- data_frame(behav_data %>%
+               group_by(subID,fac_rep,pos_RT) %>%
+  summarize(rawRT = mean(UNscaled_RT, na.rm = TRUE)))
+
+av_all_pos_RT <- data_frame(all_pos_RT %>%
+               group_by(fac_rep,pos_RT) %>%
+  summarize(rawRT = mean(rawRT, na.rm = TRUE)))
+
+
+all_reps_p <- ggplot(all_pos_RT, aes(x = pos_RT, y = rawRT,color = fac_rep)) +
+  stat_summary(data = all_pos_RT, fun.data = mean_se_, geom = "pointrange",aes(color = fac_rep), size=1) +
+  geom_line(data = av_all_pos_RT,size=1) +
+  labs(x = 'Event position', y = 'RT(ms)') +
+  scale_color_manual(values = myspec_grey) +
+  theme_gap + theme(legend.position = "none") 
+
+print(all_reps_p)
+
+```
+
+# Temporal memory test: set up the data and run models
+```{r set up the data}
+
+# analyse accuracy:
+behav_data <- filter(model_TempTestRT_data, model_TempTestRT_data$pos_first_in_corr_pair != 3)
+behav_data <- behav_data %>%
+  mutate(rem = ifelse(is.na(rem),0,1),
+         hc = ifelse(is.na(hc),0,1),
+         forg = ifelse(is.na(forg),0,1),
+         subID = factor(behav_data$subject),
+         fac_pos = factor(pos_first_in_corr_pair))
+
+acc_temporal_test <- data_frame(behav_data %>%
+               group_by(subID,fac_pos) %>%
+  summarize(tot_hits = mean(rem, na.rm = TRUE),
+            hc = mean(hc, na.rm = TRUE),
+            hits_num = sum(rem, na.rm = TRUE),
+            hc_num = sum(hc, na.rm = TRUE),
+            forg_num = sum(forg, na.rm = TRUE)))
+
+#to know if we hve enough to do rem/forg analysis - how many forgotten trials we had?
+within_forg_per_subj <- filter(acc_temporal_test,acc_temporal_test$fac_pos !=4) %>%
+  group_by(subID) %>%
+  summarise(forg_num=sum(forg_num, na.rm = TRUE))
+print(sum(within_forg_per_subj$forg_num >=10))
+
+group_temporal_test <- data_frame(acc_temporal_test %>%
+               group_by(fac_pos) %>%
+  summarize(mean_hits = mean(tot_hits, na.rm = TRUE)*100,
+            mean_hc = mean(hc, na.rm = TRUE)*100,
+            sd_hits = sd(tot_hits, na.rm = TRUE)*100,
+            sd_hc = sd(hc, na.rm = TRUE)*100))
+
+#anova accuracy:
+print(summary(aov(tot_hits ~ fac_pos + Error(subID/fac_pos), data = acc_temporal_test)))
+
+#anova high-conf:
+print(summary(aov(hc ~ fac_pos + Error(subID/fac_pos), data = acc_temporal_test)))
+
+### RTs: take only hc
+behav_data <- filter(model_TempTestRT_data, model_TempTestRT_data$hc == 1)
+#behav_data <- filter(model_TempTestRT_data, model_TempTestRT_data$rem == 1)
+behav_data <- filter(behav_data,!is.na(behav_data$temporalTestRT))
+behav_data <- behav_data %>%
+  mutate(fac_pos = factor(pos_first_in_corr_pair)) %>%
+  mutate(fac_list = factor(behav_data$list)) %>%
+  mutate(num_list = behav_data$list) %>%
+  mutate(subID = factor(behav_data$subject)) %>%
+  mutate(scaled_RT = scale(behav_data$temporalTestRT, center = FALSE)) %>%
+  mutate(sc_TrialOrderAll = scale(behav_data$temporalTestOrderAllTrials))
+
+RT_test <- data_frame(behav_data %>%
+            group_by(subID,fac_pos) %>%
+            summarize(meanRT = mean(temporalTestRT, na.rm = TRUE)/1000))
+
+data_sum <- RT_test %>%
+  group_by(fac_pos) %>%
+  summarise(mean_d = mean(meanRT),
+              SEM_d = sd(meanRT)/sqrt(n()),
+              n_data=n())
+            
+
+#
+g <- ggplot(behav_data, aes(x=fac_pos, y=temporalTestRT)) +
+    geom_violin(trim=FALSE, fill='#2F5597', alpha=0.8) +
+    stat_summary(data = behav_data,fun.data = mean_se_, geom = "pointrange", size=1) +
+    theme_bw() + theme(panel.grid.minor = element_blank())
+    
+#plot RTs for Figure 1:
+plt_test_RT <- ggplot(data_sum, aes(x = fac_pos, y = mean_d, color=fac_pos,fill=fac_pos)) +
+  geom_col() +
+  geom_point(data = RT_test, aes(x = fac_pos, y = meanRT,color = fac_pos, fill=fac_pos), shape = 21, alpha = .8,size=2, position = position_jitter(width = .12)) +
+  geom_errorbar(aes(ymin = mean_d - SEM_d, ymax = mean_d + SEM_d),width=0,position = position_nudge(x = .2)) +
+  coord_cartesian(ylim = c(.5,2.5)) +
+  scale_fill_manual(values = c("white","white","white")) +
+  scale_color_manual(values = c("black","black","black")) +
+  labs(x = "Pair Type", y = 'RT(s)') + 
+  theme_classic() + theme(legend.position = "none")
+
+  
+b <- ggplot(behav_data, aes(x=behav_data$scaled_RT)) + 
+  geom_histogram() + 
+  theme_bw() + facet_wrap(~fac_list)
+print(b)
+
+b <- ggplot(behav_data, aes(x=behav_data$scaled_RT)) + 
+  geom_histogram() + 
+  theme_bw() + facet_wrap(~fac_pos)
+
+
+b <- ggplot(behav_data, aes(x = temporalTestOrderAllTrials, y = scaled_RT)) + 
+  geom_jitter() + 
+  theme_bw()
+print(b)
+
+
+
+####### scaled RTs
+#this is reported in dissertation chapter
+##the comparison between pos1-2 to pos4-1 did not converge with default settings, so I added babyqa to all models
+#null model:
+null_mdl=glmer(scaled_RT ~ fac_list + (1|subID), data = behav_data, family = inverse.gaussian(link = 'identity'),control = glmerControl(optimizer = "bobyqa"))
+
+# all positions model:
+full_mdl=glmer(scaled_RT ~ fac_pos + fac_list +  (1|subID),data = behav_data, family = inverse.gaussian(link = 'identity'),control = glmerControl(optimizer = "bobyqa"))
+
+
+summary(full_mdl)
+print(anova(full_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(full_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+
+
+# TESTING MORE COMPLEX MODELS:
+full_mdl=glmer(scaled_RT ~ fac_pos + fac_list +  (fac_pos + fac_list + 1|subID),data = behav_data, family = inverse.gaussian(link = 'identity'),control = glmerControl(optCtrl = list(maxfun = 1e5)))
+saveRDS(new_full_mdl, file = file.path(model_output_dir,'learning','temporal_memory_all_positions_default.rda'))
+
+#I followed this: https://m-clark.github.io/posts/2020-03-16-convergence/
+#If doesn't work, try restarting:
+new_full_mdl <- reach_convergence(full_mdl)
+saveRDS(new_full_mdl, file = file.path(model_output_dir,'learning','temporal_memory_all_positions_new_full_mdl.rda'))
+
+#model_old = readRDS(file = file.path(model_output_dir,'learning','temporal_memory_all_positions_new_full_mdl.rda'))
+
+
+#if doesn't work, try all optimizers
+diff_optims <- allFit(full_mdl, maxfun = 1e5)
+saveRDS(diff_optims, file = file.path(model_output_dir,'learning','temporal_memory_all_positions_diff_optims_default_full_mdl.rda'))
+
+
+## pairwise 1-2 vs. 4-1:
+curr_data <- filter(behav_data,behav_data$fac_pos != 2)
+#null model:
+null_mdl=glmer(scaled_RT ~ fac_list + (1|subID), data = curr_data, family = inverse.gaussian(link = 'identity'),control = glmerControl(optimizer = "bobyqa"))
+
+# positions model:
+full_mdl=glmer(scaled_RT ~ fac_pos + fac_list +  (1|subID),data = curr_data, family = inverse.gaussian(link = 'identity'),control = glmerControl(optimizer = "bobyqa"))
+
+summary(full_mdl)
+print(anova(full_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(full_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+
+
+# COMPLEX MODELS: positions model:
+full_mdl=glmer(scaled_RT ~ fac_pos + fac_list +  (fac_pos + fac_list + 1|subID),data = curr_data, family = inverse.gaussian(link = 'identity'),control = glmerControl(optCtrl = list(maxfun = 1e5)))
+
+saveRDS(full_mdl, file = file.path(model_output_dir,'temporal_memory','temporal_memory_pos12vs41_defualt_mdl.rda'))
+
+new_full_mdl <- reach_convergence(full_mdl)
+saveRDS(new_full_mdl, file = file.path(model_output_dir,'temporal_memory','temporal_memory_pos12vs24_new_full_mdl.rda'))
+
+#model_old = readRDS(file = file.path(model_output_dir,'temporal_memory','temporal_memory_all_positions_new_full_mdl.rda'))
+
+
+#if doesn't work, try all optimizers
+diff_optims <- allFit(full_mdl, maxfun = 1e5)
+saveRDS(diff_optims, file = file.path(model_output_dir,'temporal_memory','temporal_memory_pos12vs41_diff_optims_default_full_mdl.rda'))
+
+
+
+## pairwise 2-3 vs. 4-1:
+curr_data <- filter(behav_data,behav_data$fac_pos != 1)
+#null model:
+null_mdl=glmer(scaled_RT ~ fac_list + (1|subID), data = curr_data, family = inverse.gaussian(link = 'identity'),control = glmerControl(optimizer = "bobyqa"))
+
+# positions model:
+full_mdl=glmer(scaled_RT ~ fac_pos + fac_list +  (fac_pos + fac_list + 1|subID),data = curr_data, family = inverse.gaussian(link = 'identity'),control = glmerControl(optCtrl = list(maxfun = 1e5)))
+
+saveRDS(full_mdl, file = file.path(model_output_dir,'temporal_memory','temporal_memory_pos23vs41_defualt_mdl.rda'))
+
+new_full_mdl <- reach_convergence(full_mdl)
+saveRDS(new_full_mdl, file = file.path(model_output_dir,'temporal_memory','temporal_memory_pos23vs41_new_full_mdl.rda'))
+
+#model_old = readRDS(file = file.path(model_output_dir,'temporal_memory','temporal_memory_all_positions_new_full_mdl.rda'))
+
+
+#if doesn't work, try all optimizers
+diff_optims <- allFit(full_mdl, maxfun = 1e5)
+saveRDS(diff_optims, file = file.path(model_output_dir,'temporal_memory','temporal_memory_pos23vs41_diff_optims_default_full_mdl.rda'))
+
+
+summary(full_mdl)
+print(anova(full_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(full_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+
+## pairwise 1-2 vs. 2-3:
+curr_data <- filter(behav_data,behav_data$fac_pos != 4)
+#null model:
+null_mdl=glmer(scaled_RT ~ fac_list + (1|subID), data = curr_data, family = inverse.gaussian(link = 'identity'),control = glmerControl(optimizer = "bobyqa"))
+
+# positions model:
+full_mdl=glmer(scaled_RT ~ fac_pos + fac_list +  (1|subID),data = curr_data, family = inverse.gaussian(link = 'identity'),control = glmerControl(optimizer = "bobyqa"))
+
+summary(full_mdl)
+print(anova(full_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(full_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+
+########### unscaled:
+#**note that gmler use ML by defalut, so no need for the REML=FALSE (also they don't take this argument)
+#** all behavior models, unscaled and scaled data converges with the regular setup (without changing the iterations and controller)
+#** however, then, when I take out brain outliers (only ~4-5 samples), the model DIDN'T converge without (without changing the iterations and controller), it did converge (at least with lCA23, rep5-rep1 data), with or without scaling the RT. However, I feel like this is not stable, and previously, with taking other brain data, it hasd convergence issues.
+#When I inspected a bit, I saw that without scaling (and with or w/o taking out the brain outliers), the residuals of the sub intercept are almost zero, with scaling they are fine. So it made me think that something is off with the model also when converging. It might suggest that I don't need mixed-level and subject intercept, but then if I average, it's against the RT approach of modeling with accounting for the tail etc, it's way less powerful. 
+# more version are below, commented out. the In some previous versions of the analyses, I also tried scaling the RT (see below). I like it less since it changes the data.
+#**also with scaling, I need to increase the number for it to converge, so keep it there.
+#TO SUM UP: because of the brain mdl, we need both scaling, and changing the controller. This is what we have now.
+
+####### scaled RTs
+
+##with chaning a bit the controller
+#null model:
+null_mdl=glmer(scaled_RT~ fac_list + (1|subID), data = behav_data, family = inverse.gaussian(link = 'identity'),control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000)))
+# # 
+# #position model:
+pos_mdl=glmer(scaled_RT ~ fac_pos + fac_list +  (1|subject),data = behav_data, family = inverse.gaussian(link = 'identity'),control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000)))
+# 
+# #position and order
+# #scaled the trial order, otherwise doesn't converge
+trial_order_pos_mdl=glmer(scaled_RT ~ sc_TrialOrderAll + fac_pos + fac_list +  (1|subID),data = behav_data, family = inverse.gaussian(link = 'identity'),control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000)))
+summary(trial_order_pos_mdl)
+print(anova(trial_order_pos_mdl,pos_mdl))
+
+
+#this trial order and pos model was preferable. Ideally, use this for the brain
+
+GGPred <- ggpredict(trial_order_pos_mdl, terms = c("sc_TrialOrderAll")) 
+curr_p <- plot(GGPred, facet = TRUE) +
+  theme_classic() +
+  labs(title = "RTs by trial order", x = "temporalTestRTorder", y = "temporal test RT (maringal effect)")
+
+
+
+```
+
