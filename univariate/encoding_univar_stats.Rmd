@@ -1,0 +1,287 @@
+---
+title: "encoding_univariate_analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# clear workspace
+rm(list = ls())
+
+#load libraries
+library(tidyr)
+library(dplyr)
+library(Matrix)
+library(lme4)
+library(standardize)
+library(readxl)
+library(effsize)
+library(ggplot2)
+library(knitr)
+library(reshape)
+library(sjstats)
+library(ggeffects)
+library(ggpubr) #that's for mean_se
+library(rstatix)
+#library(heplots)
+#Create a custom color scale
+library(RColorBrewer)
+#projct directories - on server:
+#proj_dir <- sprintf("/Volumes/data/Bein/Repatime/repatime_scanner/results/encoding/univariate/no_smooth/Univar_eachPositionModel_with_wmcsf_3sphere_noSliceTimingCorrection/FilesForR")
+
+#temp for JNeuro:
+proj_dir <- sprintf("/Users/oded/princeton_gdrive/DAVACHI_LAB/Repatime/Rfiles_data_for_JNeuro/results/encoding/univariate/no_smooth/Univar_eachPositionModel_with_wmcsf_3sphere_noSliceTimingCorrection/FilesForR")
+
+setwd(proj_dir)
+knitr::opts_knit$set(root.dir = proj_dir)
+
+############# set up themes:
+theme_gap <- theme_classic() +
+  theme(panel.border = element_rect(color = "black", fill = NA, size = 1),
+        axis.title.x = element_text(size = 22),
+        axis.text.x = element_text(size = 14),
+        axis.title.y = element_text(size = 22),
+        strip.text = element_text(size = 16),
+        title = element_text(size = 22),
+        legend.text = element_text(size = 14))
+
+```
+
+## regions ANOVA: load data
+```{r load data}
+setwd(proj_dir)
+
+get_data <- read_excel("CA23_DG_EachPos_interaction.xlsx", sheet = "Sheet1")
+rois=unique(get_data$roi)
+n=unique(get_data$subject)
+get_data$sub_ID=factor(get_data$subject)
+all_data <- get_data
+```
+## regions ANOVA: run analyses
+```{r run analyses}
+
+#check assumptions:
+#no extreme outliers:
+outliers <- get_data %>% identify_outliers(activation_t)
+#normality (should be p > .05)
+get_data %>% shapiro_test(activation_t)
+#QQ plot - the correlation btw the data and normal dist.
+ggqqplot(get_data, "activation_t", facet.by = "roi")
+
+#ANOVA across hemi:
+#change roi name
+get_data$roi <- substr(get_data$roi,5,regexpr('_025', get_data$roi)-1) #get the roi name
+
+results.rmanova <- aov(activation_t ~ repetition*position*roi*hemi + Error(sub_ID/(repetition*position*roi*hemi)), data = get_data)
+print(summary(results.rmanova))
+#eta_sq(results.rmanova, partial = TRUE)
+effectsize::eta_squared(results.rmanova, partial = TRUE)
+#we found an effect of roi by repetition, but no sig. effect of hemi was found, so we collapsed and examined within roi:
+av_hemi <- data_frame(get_data %>%
+  group_by(sub_ID,position, roi, repetition) %>%
+  summarize(activation_t = mean(activation_t)))
+
+#test the effect of repetition in ca23:
+d <- av_hemi[av_hemi$roi == "ca23",] 
+results.rmanova <- aov(activation_t ~ repetition*position + Error(sub_ID/(repetition*position)), data = d)
+print(summary(results.rmanova))
+eta_sq(results.rmanova, partial = TRUE)
+
+#test the effect of repetition in dg:
+d <- av_hemi[av_hemi$roi == "dg",] 
+results.rmanova <- aov(activation_t ~ repetition*position + Error(sub_ID/(repetition*position)), data = d)
+print(summary(results.rmanova))
+eta_sq(results.rmanova, partial = TRUE)
+
+#average to report mean and SD:
+group_univar <- data_frame(av_hemi %>%
+               group_by(roi,repetition) %>%
+  summarize(mean_act = mean(activation_t, na.rm = TRUE),
+            sd_act = sd(activation_t, na.rm = TRUE)))
+
+## since I did not find an effect of hemi, I didn't report anything below:
+#2-way ANOVA within each hemi:
+for (hemis in c('right','left')) {
+  d=get_data[get_data$hemi == hemis,]
+  print(sprintf("#### anova all reps * position * roi for %s hemi: ####",hemis))
+  results.rmanova=aov(activation_t ~ repetition*position*roi + Error(sub_ID/(repetition*position*roi)), data = d)
+print(summary(results.rmanova))
+#print(eta_sq(results.rmanova, partial = TRUE))
+
+curr_d=filter(d,d$repetition == 1 | d$repetition == 5)
+  print(sprintf("#### anova REP1 vs. REP5 * position * roi for %s hemi: ####",hemis))
+  results.rmanova=aov(activation_t ~ repetition*position*roi + Error(sub_ID/(repetition*position*roi)), data = curr_d)
+print(summary(results.rmanova))
+#print(eta_sq(results.rmanova, partial = TRUE))
+
+}
+
+#run anova on each roi:
+for (roi in rois) {
+print(sprintf("#### anova all reps for %s: ####",roi))
+d=get_data[get_data$roi == roi,]
+results.rmanova=aov(activation_t ~ repetition*position + Error(sub_ID/(repetition*position)), data = d)
+print(summary(results.rmanova))
+#print(eta_sq(results.rmanova, partial = TRUE))
+
+print(sprintf("#### anova REP1 vs. REP5 for %s: ####",roi))
+curr_d=filter(d,d$repetition == 1 | d$repetition == 5)
+results.rmanova=aov(activation_t ~ repetition*position + Error(sub_ID/(repetition*position)), data = curr_d)
+print(summary(results.rmanova))
+#print(eta_sq(results.rmanova, partial = TRUE))
+
+}
+
+
+
+```
+
+
+## plot univar
+```{r plot univar}
+
+#change roi name
+get_data <- all_data
+get_data$roi <- substr(get_data$roi,5,regexpr('_025', get_data$roi)-1) #get the roi name
+
+
+labels_rep <- c(
+  "1" = "Rep1",
+  "2" = "Rep2",
+  "3" = "Rep3",
+  "4" = "Rep4",
+  "5" = "Rep5"
+)
+
+all_spectral<-brewer.pal(9,"Greys")
+myspec_grey <-all_spectral[c(4,5,6,7,9)] #greys
+
+get_data <- get_data %>%
+  mutate(fac_rep = factor(get_data$repetition))
+#scale_color_manual(values = myspec_grey) +
+av_data <- data_frame(get_data %>%
+               group_by(fac_rep,position,roi,hemi) %>%
+  summarize(activation_t = mean(activation_t, na.rm = TRUE)))
+
+all_reps_p <- ggplot(get_data, aes(x = position, y = activation_t,color = fac_rep)) +
+  stat_summary(data = get_data, fun.data = mean_se_, geom = "pointrange",aes(color = fac_rep), size=1.5) +
+  geom_line(data = av_data,size=1.5) +
+  labs(x = 'Event position', y = 'activation(t)') +
+  scale_color_manual(values = myspec_grey) +
+  facet_grid(hemi~roi) + 
+  theme_gap + theme(legend.position = "none") 
+
+print(all_reps_p)
+
+
+```
+
+
+
+# anterior/posterior for JNeuro revision
+### regions ANOVA: load data
+```{r load data}
+setwd(proj_dir)
+
+get_data <- read_excel("ant_post_EachPos_interaction.xlsx", sheet = "Sheet1")
+rois=unique(get_data$roi)
+n=unique(get_data$subject)
+get_data$sub_ID=factor(get_data$subject)
+all_data <- get_data
+```
+### regions ANOVA: run analyses
+```{r run analyses}
+
+#check assumptions:
+#no extreme outliers:
+outliers <- get_data %>% identify_outliers(activation_t)
+#normality (should be p > .05)
+get_data %>% shapiro_test(activation_t)
+#QQ plot - the correlation btw the data and normal dist.
+ggqqplot(get_data, "activation_t", facet.by = "roi")
+
+#ANOVA across hemi:
+#change roi name
+get_data$roi <- substr(get_data$roi,regexpr('HATA_', get_data$roi)+5,nchar(get_data$roi)) #get the roi name
+
+results.rmanova <- aov(activation_t ~ repetition*position*roi*hemi + Error(sub_ID/(repetition*position*roi*hemi)), data = get_data)
+print(summary(results.rmanova))
+#eta_sq(results.rmanova, partial = TRUE)
+effectsize::eta_squared(results.rmanova, partial = TRUE)
+#we found an effect of roi by repetition, but no sig. effect of hemi was found, so we collapsed and examined within roi:
+av_hemi <- data_frame(get_data %>%
+  group_by(sub_ID,position, roi, repetition) %>%
+  summarize(activation_t = mean(activation_t)))
+
+av_hemi <- av_hemi %>%
+  mutate(boundary = ifelse(position == 1, 1, 0))
+
+#test the effect of repetition by position in anterior:
+d <- av_hemi[av_hemi$roi == "ant",] 
+results.rmanova <- aov(activation_t ~ repetition*position + Error(sub_ID/(repetition*position)), data = d)
+print(summary(results.rmanova))
+eta_sq(results.rmanova, partial = TRUE)
+
+#test the effect of repetition by position in posterior:
+d <- av_hemi[av_hemi$roi == "post",] 
+results.rmanova <- aov(activation_t ~ repetition*position + Error(sub_ID/(repetition*position)), data = d)
+print(summary(results.rmanova))
+eta_sq(results.rmanova, partial = TRUE)
+
+#test the effect of repetition by boundary in anterior:
+d <- av_hemi[av_hemi$roi == "ant",] 
+results.rmanova <- aov(activation_t ~ repetition*boundary + Error(sub_ID/(repetition*boundary)), data = d)
+print(summary(results.rmanova))
+effectsize::eta_squared(results.rmanova, partial = TRUE)
+
+#test the effect of repetition by boundary in posterior:
+d <- av_hemi[av_hemi$roi == "post",] 
+results.rmanova <- aov(activation_t ~ repetition*boundary + Error(sub_ID/(repetition*boundary)), data = d)
+print(summary(results.rmanova))
+effectsize::eta_squared(results.rmanova, partial = TRUE)
+
+#average to report mean and SD:
+group_univar <- data_frame(av_hemi %>%
+               group_by(roi,repetition) %>%
+  summarize(mean_act = mean(activation_t, na.rm = TRUE),
+            sd_act = sd(activation_t, na.rm = TRUE)))
+
+```
+
+## plot univar
+```{r plot univar}
+
+#change roi name
+get_data <- all_data
+get_data$roi <- substr(get_data$roi,regexpr('HATA_', get_data$roi)+5,nchar(get_data$roi)) #get the 
+
+labels_rep <- c(
+  "1" = "Rep1",
+  "2" = "Rep2",
+  "3" = "Rep3",
+  "4" = "Rep4",
+  "5" = "Rep5"
+)
+
+all_spectral<-brewer.pal(9,"Greys")
+myspec_grey <-all_spectral[c(4,5,6,7,9)] #greys
+
+get_data <- get_data %>%
+  mutate(fac_rep = factor(get_data$repetition))
+#scale_color_manual(values = myspec_grey) +
+av_data <- data_frame(get_data %>%
+               group_by(fac_rep,position,roi,hemi) %>%
+  summarize(activation_t = mean(activation_t, na.rm = TRUE)))
+
+all_reps_p <- ggplot(get_data, aes(x = position, y = activation_t,color = fac_rep)) +
+  stat_summary(data = get_data, fun.data = mean_se_, geom = "pointrange",aes(color = fac_rep), size=1.5) +
+  geom_line(data = av_data,size=1.5) +
+  labs(x = 'Event position', y = 'activation(t)') +
+  scale_color_manual(values = myspec_grey) +
+  facet_grid(hemi~roi) + 
+  theme_gap + theme(legend.position = "none") 
+
+print(all_reps_p)
+
+
+```

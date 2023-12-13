@@ -1,0 +1,1165 @@
+---
+title: "vectore_like_simulations"
+output: html_document
+---
+
+#setup
+```{r setup, include=FALSE, echo=FALSE,warning = FALSE, message = FALSE}
+#warning = FALSE, message = FALSE
+#knitr::opts_chunk$set(echo = TRUE)
+
+# clear workspace
+rm(list = ls())
+
+library(knitr)
+
+#libraries for data handling:
+library(tidyverse)
+library(reshape) #for melt/cast
+library(Matrix) #A rich hierarchy of matrix classes, including triangular, symmetric, and diagonal matrices, both dense and sparse and with pattern, logical and numeric entries. Numerous methods for and operations on these matrices,
+library(standardize) #for the scale_by function
+
+library(geometry) #for the dot function (calculate inner product)
+#plotting:
+library(ggplot2)
+library(ggpubr) #built on ggplot2, I think i use it for the mean_se_ somthing - to show SEM on graphs.
+library(gridExtra) #that's for the grid.arrange
+
+#Create a custom color scale
+library(RColorBrewer)
+
+#theme for plot:
+theme_all_gaps <- theme_classic() +
+  theme(panel.border = element_rect(color = "black", fill = NA, size = 1),
+        axis.title.x = element_text(size = 26),
+        axis.text.x = element_text(size = 14),
+        axis.title.y = element_text(size = 26),
+        strip.text = element_text(size = 18),
+        title = element_text(size = 22),
+        legend.text = element_text(size = 18),
+        legend.title = element_blank(),
+        legend.position = c(0.8, 0.2),
+        legend.background = element_rect(fill= rgb(0.9,0.9,0.9)))
+
+
+```
+
+#DEFINE FUNCTIONS
+```{r define functions, include=FALSE, echo=FALSE,warning = FALSE, message = FALSE}
+#define norm_vec function
+norm_vec <- function(x) sqrt(sum(x^2))
+
+#default values:
+max_pat_size=200
+act_lim=2
+num_steps=10
+
+initiate_patterns_measures <- function(max_pat_size,act_lim,num_steps) {
+#print(length(num_steps))
+  
+ns_ps=num_steps[1]
+if (length(num_steps) == 2) { ns_act = num_steps[2] } else { ns_act = num_steps[1] }
+  
+if (length(max_pat_size) == 1) {
+  pat_size=seq(20, max_pat_size, length.out = ns_ps)
+} else if (length(max_pat_size) == 2) {
+  pat_size=seq(max_pat_size[1], max_pat_size[2], length.out = ns_ps)
+}
+#print(ns_ps)
+#print(ns_act)
+if (length(act_lim) == 1) {
+  activation=seq(-act_lim,act_lim,length.out = ns_act)
+} else if (length(act_lim) == 2) {
+activation=seq(act_lim[1],act_lim[2],length.out = ns_act)
+}
+r_all=matrix(NA, nrow = length(pat_size),ncol = length(activation))
+spear_all=matrix(NA, nrow = length(pat_size),ncol = length(activation))
+ndp_all=matrix(NA, nrow = length(pat_size),ncol = length(activation))
+ndiff_all=matrix(NA, nrow = length(pat_size),ncol = length(activation))
+all_msrs = list(r_all,spear_all,ndp_all,ndiff_all)
+
+return(list(pat_size,activation,all_msrs))
+
+}
+
+calc_msrs <- function (ipt_s,iact,pat1,pat2,all_msrs) {
+all_msrs[[1]][ipt_s,iact]=cor(pat1,pat2,method = "pearson") #r_all
+all_msrs[[2]][ipt_s,iact]=cor(pat1,pat2, method = "spearman") #spear_all
+all_msrs[[3]][ipt_s,iact]=dot(pat1,pat2)/(norm_vec(pat1)*norm_vec(pat2)) #ndp_all
+all_msrs[[4]][ipt_s,iact]=abs(norm_vec(pat1)-norm_vec(pat2)) #ndiff_all
+
+return(all_msrs)
+
+}        
+
+plot_msrs <- function (all_msrs,pat_size,activation) {
+  
+r_all <- all_msrs[[1]]
+spear_all <- all_msrs[[2]]
+ndp_all <- all_msrs[[3]] 
+ndiff_all <- all_msrs[[4]] 
+
+rownames(r_all) <- pat_size
+colnames(r_all) <- activation
+rownames(spear_all) <- pat_size
+colnames(spear_all) <- activation
+rownames(ndp_all) <- pat_size
+colnames(ndp_all) <- activation
+rownames(ndiff_all) <- pat_size
+colnames(ndiff_all) <- activation
+r_plot <- melt(r_all) %>% rename_(Pearsons_r = "value")
+spear_plot <- melt(spear_all) %>% rename_(Spearman_rho = "value")
+ndp_plot <- melt(ndp_all) %>% rename_(ndp = "value")
+ndiff_plot <- melt(ndiff_all) %>% rename_(norm_diff = "value")
+comb_measures=merge(r_plot,ndp_plot, by= c("X1","X2"))
+comb_measures=merge(comb_measures,spear_plot, by= c("X1","X2"))
+comb_measures=merge(comb_measures,ndiff_plot, by= c("X1","X2")) %>%
+  rename_(num_voxels = "X1",
+          activation_level = "X2")
+
+comb_measures <- melt(comb_measures, id=c("num_voxels","activation_level")) %>%
+  rename_(measure = "variable")
+
+#plot:
+all_spectral<-brewer.pal(9,"Set1")
+myspec_all <- all_spectral[c(1,3,4,5)]
+myspec2 <- all_spectral[c(1,3,4)]
+# labs(title = "half/half activation") +
+p_all.1 <- ggplot(comb_measures, aes(x=activation_level,y=value,color=measure)) +
+            geom_line() +
+            geom_point() +
+            scale_color_manual(values = myspec_all) +
+            facet_wrap(~num_voxels, nrow=2) +
+            theme_classic()
+
+p_all.2 <- ggplot(comb_measures, aes(x=num_voxels,y=value,color=measure)) +
+            geom_line() +
+            geom_point() +
+            scale_color_manual(values = myspec_all) +
+            facet_wrap(~activation_level, nrow = 2) +
+            theme_classic()
+
+#plot only one graph with Pearson's r and ndp:
+sel_msr <- filter(comb_measures,comb_measures$num_voxels==pat_size[5] & !(comb_measures$measure == "norm_diff")) # && comb_measures$measure != "norm_diff"
+p_ndp_r <- ggplot(sel_msr, aes(x=activation_level,y=value,color=measure)) +
+            geom_line() +
+            geom_point() +
+            scale_color_manual(values = myspec2) +
+            theme_classic()
+
+
+sel_msr <- filter(comb_measures, comb_measures$measure == "ndp") # 
+sel_msr <- sel_msr %>% rename_(overlapping_voxels = "num_voxels")
+p_ndp <- ggplot(sel_msr, aes(x=activation_level,y=value,alpha=overlapping_voxels, color = measure)) +
+            #geom_line() +
+            geom_point() +
+            scale_color_manual(values = all_spectral[3]) +
+            theme_classic()
+
+p=list(p_all.1,p_all.2,p_ndp_r,p_ndp)
+return(p)  
+
+}
+
+
+###### functions for DG simulation:
+calc_msrs_dg <- function (it,pat,all_msrs) {
+
+#within gap1:
+save_cors=array(NA,c(4,3))
+for (x in c(1,2,3)) {
+  pat1=pat[,x];pat2=pat[,(x+1)]
+  save_cors[1,x]=cor(pat1,pat2,method = "pearson")
+  save_cors[2,x]=cor(pat1,pat2,method = "spearman")
+  save_cors[3,x]=dot(pat1,pat2)/(norm_vec(pat1)*norm_vec(pat2)) #ndp
+  save_cors[4,x]=abs(norm_vec(pat1)-norm_vec(pat2)) #ndiff_all
+}
+for (ms in 1:4) {
+ all_msrs[[ms]][1,1,it]=mean(save_cors[ms,]) 
+}
+
+#within gap2:
+save_cors=array(NA,c(4,2))
+for (x in c(1,2)) {
+  pat1=pat[,x];pat2=pat[,(x+2)]
+  save_cors[1,x]=cor(pat1,pat2,method = "pearson")
+  save_cors[2,x]=cor(pat1,pat2,method = "spearman")
+  save_cors[3,x]=dot(pat1,pat2)/(norm_vec(pat1)*norm_vec(pat2)) #ndp
+  save_cors[4,x]=abs(norm_vec(pat1)-norm_vec(pat2)) #ndiff_all
+}
+for (ms in 1:4) {
+ all_msrs[[ms]][1,2,it]=mean(save_cors[ms,]) 
+}
+
+#within gap3:
+save_cors=array(NA,4)
+pat1=pat[,1];pat2=pat[,4]
+save_cors[1]=cor(pat1,pat2,method = "pearson")
+save_cors[2]=cor(pat1,pat2,method = "spearman")
+save_cors[3]=dot(pat1,pat2)/(norm_vec(pat1)*norm_vec(pat2)) #ndp
+save_cors[4]=abs(norm_vec(pat1)-norm_vec(pat2)) #ndiff_all
+for (ms in 1:4) {
+ all_msrs[[ms]][1,3,it]=mean(save_cors[ms]) 
+}
+
+#across gap1:
+save_cors=array(NA,4)
+pat1=pat[,4];pat2=pat[,5]
+save_cors[1]=cor(pat1,pat2,method = "pearson")
+save_cors[2]=cor(pat1,pat2,method = "spearman")
+save_cors[3]=dot(pat1,pat2)/(norm_vec(pat1)*norm_vec(pat2)) #ndp
+save_cors[4]=abs(norm_vec(pat1)-norm_vec(pat2)) #ndiff_all
+for (ms in 1:4) {
+ all_msrs[[ms]][2,1,it]=mean(save_cors[ms]) 
+}
+
+#across gap2:
+save_cors=array(NA,c(4,2))
+for (x in c(3,4)) {
+  pat1=pat[,x];pat2=pat[,(x+2)]
+  save_cors[1,x-2]=cor(pat1,pat2,method = "pearson")
+  save_cors[2,x-2]=cor(pat1,pat2,method = "spearman")
+  save_cors[3,x-2]=dot(pat1,pat2)/(norm_vec(pat1)*norm_vec(pat2)) #ndp
+  save_cors[4,x-2]=abs(norm_vec(pat1)-norm_vec(pat2)) #ndiff_all
+}
+for (ms in 1:4) {
+ all_msrs[[ms]][2,2,it]=mean(save_cors[ms,]) 
+}
+
+#across gap3:
+save_cors=array(NA,c(4,3))
+for (x in c(2,3,4)) {
+  pat1=pat[,x];pat2=pat[,(x+3)]
+  save_cors[1,x-1]=cor(pat1,pat2,method = "pearson")
+  save_cors[2,x-1]=cor(pat1,pat2,method = "spearman")
+  save_cors[3,x-1]=dot(pat1,pat2)/(norm_vec(pat1)*norm_vec(pat2)) #ndp
+  save_cors[4,x-1]=abs(norm_vec(pat1)-norm_vec(pat2)) #ndiff_all
+}
+for (ms in 1:4) {
+ all_msrs[[ms]][2,3,it]=mean(save_cors[ms,]) 
+}
+
+
+return(all_msrs)
+
+}     
+
+
+df_msrs_dg <- function (all_msrs) {
+
+msrs <- c("Pearson","Spearman","ndp","norm_diff")
+sum_msrs <- setNames(data.frame(matrix(ncol = 5, nrow = 0)), c("X1","X2","mn","std","measure"))
+
+for (curr_msr in 1:4) {
+j=all_msrs[[curr_msr]]
+j_mn <- apply(j, c(1,2), mean)
+j_sd <- apply(j, c(1,2), sd)
+
+rownames(j_mn) <- c("within","across")
+colnames(j_mn) <- c(1,2,3)
+rownames(j_sd) <- c("within","across")
+colnames(j_sd) <- c(1,2,3)
+
+j_mn <- melt(j_mn) %>% rename_(mn = "value")
+j_sd <- melt(j_sd) %>% rename_(std = "value")
+j <- merge(j_mn,j_sd, by= c("X1","X2"))
+j$measure <- msrs[curr_msr]
+
+sum_msrs <- rbind(sum_msrs,j)
+}
+
+sum_msrs <- sum_msrs %>%
+  rename_(event = "X1",
+          gap = "X2")
+
+return(sum_msrs)
+
+}
+```
+
+# Rational
+
+The idea in these simulations is to examine how changes in activation/activity patterns
+modulate each measure (Pearson's R, MDP, norm difference).
+
+### Aims
+1. We want to garner support for the notion that our Pearson's R correlations stems from changes in population of voxels activated (potentially, voxels-remapping), rather than differences in activation across the population (potentially, rate remapping). We'll show that ndp is not sensitive to such changes, while norm-difference is. Our findings are specific to ndp.
+
+2. By examining different types of changes in the activity pattern, and seeing how they modulate Pearson's R and ndp, we might be able to further specify the possible changes in the pattern that lead to our data.
+
+* I feel like the simulations are convincing towards aim (1). Regarding aim (2) - less sure,because there's no 1-1 mapping. Different combination of changes can lead to similar results.
+
+* In some cases, it is also interesting to see what influences (or not) the correlation measure - even if the additional measures do not provide additional information.
+
+Additionall things I examined:
+
+1. How changes in activation level of a part of the pattern is modifying each measure. For example - if only anterior CA3 increase it's activation - what changes that makes?
+
+2. How the size of a region influence each measure?
+
+3. How repetition suppression might influence - this is embedded in simulations 3-4.
+
+* I looked at Spearman's rho as well as  correlation measure, to see our results are not specific to Pearson. Generally, Pearson's R and Spearman's rho converged.
+
+> voxel nums left CA3 and left DG:
+based on (in matlab):
+load('/Volumes/data/Bein/Repatime/repatime_scanner/results/encoding/rsa/no_smooth/filtered100s_mtc_clean_mc_wmcsf_3sphere/hipp_voxel_numbers.mat')
+
+>left ca23_025: mean: 39.41, SD: 8.88 range (across subs): 21-60
+
+>left dg_025: mean: 47.8, SD: 9.82 range (across subs): 30-68
+
+
+I z-score the voxels per voxel across time, so our values are overall in unites of SD - that means a normal distribution. But, still useful to do Madar's "extreme cases", because these are the most illustrative.
+ - I can simulate the same thing, but with some noise levels and averaging across multiple simulations, but not sure what it'll tell us more than the extreme case (i.e., w/o noise)
+
+
+# MADAR-LIKE SIMULATIONS
+### sim 1: Sanilty check. Half of the voxels fire for one item, the other half for the other
+#### e.g. [0,0,0,x,x,x],[x,x,x,0,0,0]
+```{r sim1, warning = FALSE, message = FALSE}
+
+#loop through activation level, and trough size of the region:
+init = initiate_patterns_measures(max_pat_size,act_lim,num_steps)
+pat_size = init[[1]]; activation=init[[2]];all_msrs=init[[3]];
+
+#loop through pat size and activation levels
+for (ipt_s in 1:length(pat_size)) {
+    pt_s=pat_size[ipt_s]
+    for (iact in 1:length(activation)) {
+        act=activation[iact]
+        
+        #that's the part to change in each simulation:
+        pat1=c(replicate(pt_s/2,0), replicate(pt_s/2,act))
+        pat2=c(replicate(pt_s/2,act),replicate(pt_s/2,0))
+        
+        #calculate each measure:
+        all_msrs = calc_msrs(ipt_s,iact,pat1,pat2,all_msrs)
+}
+}
+
+#organize the data in one data frame and create the plot:
+p = plot_msrs(all_msrs,pat_size,activation)
+
+print(p[[1]])
+#print(p[[2]])
+```
+
+#### comments on sim 1:
+1. ndp is also 0, hiding behind norm_diff
+
+2. Both Pearson and Spearman are -1.
+
+3. That means, that in this set up, if all activated voxels in _both_ patterns are getting some activation boost  it doesn't matter for either measure.
+
+### sim 2.1: half of the voxels are activated for one item, the other half for the other, change activation levels in one pattern   
+#### e.g. [0,0,0,1,1,1],[x,x,x,0,0,0]. This shows how ndp is not sensitive, as long as it's not the same population of voxels.
+```{r sim2.1, warning = FALSE, message = FALSE}
+
+#loop through activation level, and trough size of the region:
+#loop through activation level, and trough size of the region:
+init = initiate_patterns_measures(max_pat_size,act_lim,num_steps)
+pat_size = init[[1]]; activation=init[[2]];all_msrs=init[[3]];
+
+#loop through pat size and activation levels
+for (ipt_s in 1:length(pat_size)) {
+    pt_s=pat_size[ipt_s]
+    for (iact in 1:length(activation)) {
+        act=activation[iact]
+        
+        #that's the part to change in each simulation:
+        pat1 = c(replicate(pt_s/2,0), replicate(pt_s/2,1)) #
+        pat2 = c(replicate(pt_s/2,act),replicate(pt_s/2,0))
+        
+        #calculate each measure:
+        all_msrs = calc_msrs(ipt_s,iact,pat1,pat2,all_msrs)
+}
+}
+
+#organize the data in one data frame and create the plot:
+p = plot_msrs(all_msrs,pat_size,activation)
+
+print(p[[1]])
+#print(p[[2]])
+print(p[[3]]) #just to make sure there's nothing with the scale
+
+```
+
+#### comments on sim 2.1:
+1. _norm_diff_: makes sense: the norm of one pattern is fixed on 1. The other - the larger the absolute values of the activation values are different from 1, the larger is the difference. 
+
+2. _ndp_: as long as different voxels are activated - the ndp is 0 - because the angle between the vectors doesn't change - just that one vector becomes longer. The vectors are still orthogonal. 
+
+3. _Pearons's r_: since we're subtracting the average - that means that when the activation in the "activated" voxels is negative (e.g. [0,0,0,1,1,1],[-1,-1,-1,0,0,0]; can be also -2, -x, doesn't matter since the correlation corrects the mean and SD- so both pattern become [-.5,-.5,-.5,.5,.5,.5] ) - both have the same relationship as the fixed pattern - half is lower than the  other half. The correlation is 1. When, however the "activated" voxels are positive (e.g. [0,0,0,1,1,1],[1,1,1,0,0,0]) - the relationship is opposite, and Pearson's r is -1. That all makes sense. 
+
+##### Take away:
+- A good case for showing how Pearson's R and ndp give us different information-and it's not trivial that we got similar results.
+
+### sim 2.2: like 2.1, but instead of 0, put -1 for non-activated  
+#### 0 is not realistic for a voxel. So, change incativated to -1. e.g., [-1,-1,-1,1,1,1],[x,x,x,-1,-1,-1].
+```{r sim2.2, warning = FALSE, message = FALSE}
+#act_lim = 10
+#loop through activation level, and trough size of the region:
+#loop through activation level, and trough size of the region:
+init = initiate_patterns_measures(max_pat_size,act_lim,num_steps)
+pat_size = init[[1]]; activation=init[[2]];all_msrs=init[[3]];
+
+#loop through pat size and activation levels
+for (ipt_s in 1:length(pat_size)) {
+    pt_s=pat_size[ipt_s]
+    for (iact in 1:length(activation)) {
+        act=activation[iact]
+        
+        #that's the part to change in each simulation:
+        pat1 = c(replicate(pt_s/2,-1), replicate(pt_s/2,1)) #
+        pat2 = c(replicate(pt_s/2,act),replicate(pt_s/2,-1))
+        
+        #calculate each measure:
+        all_msrs = calc_msrs(ipt_s,iact,pat1,pat2,all_msrs)
+}
+}
+
+#organize the data in one data frame and create the plot:
+p = plot_msrs(all_msrs,pat_size,activation)
+
+print(p[[1]])
+#print(p[[2]])
+print(p[[3]]) #just to make sure there's nothing with the scale
+
+```
+
+#### comments on sim 2.2:
+1. _ndp_: now, there's a part of the pattern that points in opposite directions, so ndp tends to be lower. The other part (that we modulate), as long as it is negative, ndp is a bit higher. when it's positive, that's really the opposite of the other pattern - so ndp is lower.
+
+2. _correlation_: same as before, only changes signs already when x=-1.
+
+### sim 3.1: same half of the voxels fire for both items, but change activation levels in one pattern only
+#### e.g. [0,0,0,1,1,1],[0,0,0,x,x,x]. 
+Potentially: this is equivalent to measuring all CA3, then having only anterior CA3 responsive to the task/items, and changing univariate activation in anterior CA3.
+```{r sim3.1, warning = FALSE, message = FALSE}
+
+
+#loop through activation level, and trough size of the region:
+#loop through activation level, and trough size of the region:
+init = initiate_patterns_measures(max_pat_size,act_lim,num_steps)
+pat_size = init[[1]]; activation=init[[2]];all_msrs=init[[3]];
+
+#loop through pat size and activation levels
+for (ipt_s in 1:length(pat_size)) {
+    pt_s=pat_size[ipt_s]
+    for (iact in 1:length(activation)) {
+        act=activation[iact]
+        
+        #that's the part to change in each simulation:
+        pat1 = c(replicate(pt_s/2,0), replicate(pt_s/2,1)) #set pat1 to be at 1 all the time
+        pat2 = c(replicate(pt_s/2,0),replicate(pt_s/2,act))
+        
+        #calculate each measure:
+        all_msrs = calc_msrs(ipt_s,iact,pat1,pat2,all_msrs)
+}
+}
+
+#organize the data in one data frame and create the plot:
+p = plot_msrs(all_msrs,pat_size,activation)
+
+print(p[[1]])
+#print(p[[2]])
+print(p[[3]])
+```
+
+#### comments on sim 3.1:
+1. _norm_diff_: compare to sim2 - doesn't matter which voxels are activated - just the total norm - as should be
+
+2. _ndp_: in simulation 2.1, it didn't matter the level to which the voxels were activated, because these were not the same voxels, so does't matter. now - we're changing *the same* group of neurons. So, if they are negative - point on the same axes (voxels), but in the opposite direction, so it's 180 degrees difference - ndp=-1. If they are positive - and since here it's exactly the same voxels - it means they point in the same direction. And - since the norm itself is accounted for - the size doesn't matter (so all is 1 or -1) - the size of the vector, how long a vector is in a specific direction - doesn't matter. only the direction (for the angle).
+
+3. _Pearons's r_: it's identical to before, only that now we're switching the half that is activated - so it flips. but same meaning.
+
+*Regarding our data*: We do not see differences in norm_diff. So, if the same voxels are engaged, but change their activation levels - for example, if within vs. across in CA3 is the same population of voxels, changing their activation level in the change of the event - we should see differences in norm_diff (all cases where activation level is not 1 or -1). It is possible that voxels flip from 1 to -1 - in the switch of event. That would produce lower correlation and ndp (as seen here), and if the flip but have the same magnitude - no changes in norm_diff. but, that means that in the next event - they should flip back to 1. That would produce an effect of color on similarity in CA3, which we do not see.
+
+### sim 3.2: same half of the voxels is not activated in both, then of the other half, 25% fire in one pattern, the other 25% fire in the other pattern, and change activation levels in one pattern only
+#### e.g. [0,0,0,0,1,1,0,0],[0,0,0,0,0,0,x,x]
+```{r sim3.2, warning = FALSE, message = FALSE}
+
+
+#loop through activation level, and trough size of the region:
+#loop through activation level, and trough size of the region:
+init = initiate_patterns_measures(max_pat_size,act_lim,num_steps)
+pat_size = init[[1]]; activation=init[[2]];all_msrs=init[[3]];
+
+#loop through pat size and activation levels
+for (ipt_s in 1:length(pat_size)) {
+    pt_s=pat_size[ipt_s]
+    for (iact in 1:length(activation)) {
+        act=activation[iact]
+        
+        #that's the part to change in each simulation:
+        pat1 = c(replicate(pt_s/2,0), replicate(pt_s/4,1),replicate(pt_s/4,0)) #set pat1 to be at 1 all the time
+        pat2 = c(replicate(pt_s/2,0),replicate(pt_s/4,0),replicate(pt_s/4,act))
+        
+        #calculate each measure:
+        all_msrs = calc_msrs(ipt_s,iact,pat1,pat2,all_msrs)
+}
+}
+
+#organize the data in one data frame and create the plot:
+p = plot_msrs(all_msrs,pat_size,activation)
+
+print(p[[1]])
+#print(p[[2]])
+print(p[[3]])
+```
+
+#### comments on sim 3.2:
+1. _norm_diff_: compare to sim2 - doesn't matter which voxels are activated - just the total norm - as should be
+
+2. _ndp_: for ndp - it doesn't matter - as long the the activated voxels do not overalap - ndp is zero.
+
+3. _Pearons's r_: it's identical to before, only smaller range
+
+
+
+### sim 3.3: same as 3.1, but inactivated on -1
+#### e.g. [-1,-1,-1,1,1,1],[-1,-1,-1,x,x,x]. 
+Potentially: this is equivalent to measuring all CA3, then having only anterior CA3 responsive to the task/items, and changing univariate activation in anterior CA3.
+```{r sim3.3, warning = FALSE, message = FALSE}
+
+
+#loop through activation level, and trough size of the region:
+#loop through activation level, and trough size of the region:
+init = initiate_patterns_measures(max_pat_size,act_lim,num_steps)
+pat_size = init[[1]]; activation=init[[2]];all_msrs=init[[3]];
+
+#loop through pat size and activation levels
+for (ipt_s in 1:length(pat_size)) {
+    pt_s=pat_size[ipt_s]
+    for (iact in 1:length(activation)) {
+        act=activation[iact]
+        
+        #that's the part to change in each simulation:
+        pat1 = c(replicate(pt_s/2,-1), replicate(pt_s/2,1)) #set pat1 to be at 1 all the time
+        pat2 = c(replicate(pt_s/2,-1),replicate(pt_s/2,act))
+        
+        #calculate each measure:
+        all_msrs = calc_msrs(ipt_s,iact,pat1,pat2,all_msrs)
+}
+}
+
+#organize the data in one data frame and create the plot:
+p = plot_msrs(all_msrs,pat_size,activation)
+
+print(p[[1]])
+#print(p[[2]])
+print(p[[3]])
+```
+
+#### comments on sim 3.3 (compare to 2.2):
+1. _ndp_: compare to sim2.2 same idea, only that now more voxels are aligned on the same direction - so changing towards +1 rather than -1. 
+
+- note that note that the ndp is more sensitive to changes activatiobn levels than correlation.
+
+### sim 4: same half of the voxels fire for both items, but change activation levels in 50% of the active voxels in one pattern only (e.g., in all CA3, posterior is inactive, mid and anterior are, and only anterior changes activation levels)
+#### e.g. [0,0,0,0,1,1,1,1],[0,0,0,0,1,1,x,x]
+```{r sim4, warning = FALSE, message = FALSE}
+#loop through activation level, and trough size of the region:
+init = initiate_patterns_measures(max_pat_size,act_lim,num_steps) #act_lim
+pat_size = init[[1]]; activation=init[[2]];all_msrs=init[[3]];
+
+#loop through pat size and activation levels
+for (ipt_s in 1:length(pat_size)) {
+    pt_s=pat_size[ipt_s]
+    for (iact in 1:length(activation)) {
+        act=activation[iact]
+        
+        #that's the part to change in each simulation:
+        pat1 = c(replicate(pt_s/2,0), replicate(pt_s/2,1)) #set pat1 to be at 1 all the time
+        pat2 = c(replicate(pt_s/2,0),replicate(pt_s/4,1),replicate(pt_s/4,act))
+        
+        #calculate each measure:
+        all_msrs = calc_msrs(ipt_s,iact,pat1,pat2,all_msrs)
+}
+}
+
+#organize the data in one data frame and create the plot:
+p = plot_msrs(all_msrs,pat_size,activation)
+
+print(p[[1]])
+#print(p[[2]])
+print(p[[3]])
+
+```
+
+#### comments on sim 4:
+1. _norm_diff_: compare to sim2 and 3 - doesn't matter which voxels are activated - just the total norm - as should be.
+
+2. _ndp_: compared to sim3, makes the change more gradual -because half the pattern is already at R=1/ndp=1, the more voxels change to be more aligned with 1, the higher the value is both measures. And - when the values are larger than 1 or smaller than -1, again start to decrease.
+
+3. _Pearons's r_: like ndp
+
+4. Sim 3-4 show that in these set ups, both correlation measures and ndp are sensitive to _change of direction_. If the same population of voxels is activated, the main thing that matters is whether voxels switched from increasing firing rate to decreasing firing rates - relative to their mean activation across the run (because that's how I did the analysis).
+
+## Take home so far, regarding our data:
+
+1. Our results are unlikely to be attributed to a group of voxels uniformly changing their activation level (within the same positive/negative range). That doesn't change ndp/correlation (like we see in the data). It does change norm_diff, which we do not see in the data. Thus, likely points towards voxel-remapping rather than rate-remapping
+
+2. Still, can be that voxels flip from -1 to +1 (or the same level of activation, to exactly the same but negative). That might be, for example, if neurons oscillate within a fixed range. However, that would imply a color representation in CA3, which we do not see (because would flip based on events). In DG, if a group of neurons flipped from n (+1) to n+1 (-1), they'll have to flip again for n+2 (+1), and again to n+3 (-1) to produce low correlation btw n+1/n+2 and n+2/n+3. That would mean that the similarity btw n and n+3 should be low, and it's not. 
+
+### sim 5.1: deactivation of activated voxels:
+#### one pattern is set to 1 - all voxels are activated, the other changes, deactivate more and more voxels: e.g., [1,1,1,1,1] and [0,1,1,1,1] vs. [1,1,1,1,1] and [0,0,0,0,1]
+```{r sim5.1, warning = FALSE, message = FALSE}
+#loop through activation level, and trough size of the region:
+#use act_lim to insert the levels of overlapping voxels:
+init = initiate_patterns_measures(max_pat_size,c(0.1,1),num_steps)
+pat_size = init[[1]]; activation=init[[2]];all_msrs=init[[3]];
+
+#loop through pat size and activation levels
+for (ipt_s in 1:length(pat_size)) {
+    pt_s=pat_size[ipt_s]
+    for (iact in 1:length(activation)) {
+        act=activation[iact]*pt_s
+        act_inv=(1-activation[iact])*pt_s
+        #that's the part to change in each simulation:
+        pat1 = c(rnorm(pt_s,1,0.1)) #cannot set pat1 to be at 1 all the time, because then sd will be 0 and cannot compute Pearson's R/Spearman, so I did from normal dist centered around 1, with minimal sd
+        pat2 = c(rep(1,times = ceiling(act_inv)),rep(0,act))
+        # fprintf("pat1: %d",length(pat1)) #load pracma library for fprintf
+        # fprintf("pat2: %d\n",length(pat2))
+        #calculate each measure:
+        all_msrs = calc_msrs(ipt_s,iact,pat1,pat2,all_msrs)
+}
+}
+
+#organize the data in one data frame and create the plot:
+p = plot_msrs(all_msrs,pat_size,activation)
+
+p[[1]] <- p[[1]] + xlab("% deactivated voxels")
+p[[2]] <- p[[2]] #+ xlab("% overlapping voxels")
+print(p[[1]])
+#print(p[[2]])
+print(p[[3]])
+```
+
+#### comments on sim 5.1:
+1. _norm_diff_: makes sense - more voxels are deactivated (truncated from the pattern) - the higher is the difference
+
+2. _ndp_: ndp is sensitive to the amount of overlapping activated voxels - more overlap, higher ndp
+
+3. _Pearons's r/Spearman rho_: correlation is not sensitive to the amount of deactivated/overlapping voxels. Here, more activated voxels also means higher average, which is then subtracted. So, our data also does not reflect deactivating/activating some voxels (also within event - where there's no change, we see no difference in norm_diff)
+
+### sim 5.2: one pattern is totally not activated, the other is "adding" more voxelsL
+#### one pattern is set to 0, the other changes: e.g., [0,0,0,0,0] and [0,0,0,0,1] vs. [0,0,0,0,0] and [0,1,1,1,1]
+```{r sim5.2, warning = FALSE, message = FALSE}
+#loop through activation level, and trough size of the region:
+#use act_lim to insert the levels of overlapping voxels:
+init = initiate_patterns_measures(max_pat_size,c(0.1,1),num_steps)
+pat_size = init[[1]]; activation=init[[2]];all_msrs=init[[3]];
+
+#loop through pat size and activation levels
+for (ipt_s in 1:length(pat_size)) {
+    pt_s=pat_size[ipt_s]
+    for (iact in 1:length(activation)) {
+        act=activation[iact]*pt_s
+        act_inv=(1-activation[iact])*pt_s
+        #that's the part to change in each simulation:
+        pat1 = c(rnorm(pt_s,0,0.1)) #cannot set pat1 to be at 1 all the time, because then sd will be 0 and cannot compute Pearson's R/Spearman, so I did from normal dist centered around 1, with minimal sd
+        pat2 = c(rep(0,times = ceiling(act_inv)),rep(1,act))
+        # fprintf("pat1: %d",length(pat1)) #load pracma library for fprintf
+        # fprintf("pat2: %d\n",length(pat2))
+        #calculate each measure:
+        all_msrs = calc_msrs(ipt_s,iact,pat1,pat2,all_msrs)
+}
+}
+
+#organize the data in one data frame and create the plot:
+p = plot_msrs(all_msrs,pat_size,activation)
+
+p[[1]] <- p[[1]] + xlab("% added voxels")
+p[[3]] <- p[[3]] + xlab("% added voxels")
+print(p[[1]])
+#print(p[[2]])
+print(p[[3]]) #the differneces in the correlations are noise
+
+```
+
+#### comments on sim 5.2:
+For all correlation measures and ndp, doesn't matter, because the all-0 vector is like a point on the origin. so the value is 0. It's like a specific case of non-overlapping voxels. Overlapping voxels on 0 do not matter to the measures - they don't change the angle btw voxels. 
+
+
+### sim 6.1: change the percentage of overlapping voxels - and the level of activation
+#### now, one pattern is set to 1, the other changes: e.g., [1,1,1,1,1] and [0,0,0,0,x] vs. [1,1,1,1,1] and [0,x,x,x,x] - where x ranges btw positive and negative
+```{r sim6.1, warning = FALSE, message = FALSE}
+#loop through activation level, and levels of overlapping voxels:
+#use init pat_size to insert the levels of overlapping voxels:
+init = initiate_patterns_measures(c(0.1,1),act_lim,num_steps)
+overlap = init[[1]]; activation=init[[2]];all_msrs=init[[3]];
+#set pt_s:
+pt_s = 100
+#loop through pat size and activation levels
+for (iol in 1:length(overlap)) {
+    ol=overlap[iol]*pt_s
+    ol_inv=ceiling((1-overlap[iol])*pt_s)
+    #fprintf("ol: %f, ol_inv: %f\n",ol,ol_inv) #load pracma library for fprintf
+    for (iact in 1:length(activation)) {
+        act=activation[iact]
+        #that's the part to change in each simulation:
+        pat1 = c(rnorm(pt_s,1,0.1)) #cannot set pat1 to be at 1 all the time, because then sd will be 0 and cannot compute Pearson's R/Spearman, so I did from normal dist centered around 1, with minimal sd
+        pat2 = c(rep(0,times = ol_inv),rep(act,ol))
+        #fprintf("act: %f\n",act)
+        #fprintf("pat1: %d pat2: %d\n",length(pat1),length(pat2)) #load pracma library for fprintf
+        
+        #calculate each measure:
+        all_msrs = calc_msrs(iol,iact,pat1,pat2,all_msrs)
+}
+}
+
+#organize the data in one data frame and create the plot:
+p = plot_msrs(all_msrs,overlap,activation)
+
+#p[[1]] <- p[[1]] + ylab("% overlapping voxels")
+p[[2]] <- p[[2]] + xlab("% overlapping voxels")
+print(p[[1]])
+print(p[[2]])
+print(p[[3]])
+print(p[[4]])
+```
+
+#### comments for 6.1: 
+1. Simulation 5.1 is like a specific case of this - when activation level == 1.
+
+2. 2nd graph is interesting in comparison to simulation 7. ndp looks the same as in simulation 7. correlation values stay on 0, whereas in simulation 7 they change. That shows that the change in average here, compared to no change in average in simulation 7, influences the correlation measures. Here, when there's more overlap, there's also a change in the average of the changed pattern, which counteracts the "change in pattern". In 7, we don't see it.
+
+### sim 6.2: same as 6.1, but the other voxels in the pattern that changes are on 1
+#### now, one pattern is set to 1, the other changes: e.g., [1,1,1,1,1] and [1,1,1,1,x] vs. [1,1,1,1,1] and [1,x,x,x,x] - where x ranges btw positive and negative.
+That might be like deactivating a part of the activated voxels, or activating a part of the pattern.
+```{r sim6.2, warning = FALSE, message = FALSE}
+#loop through activation level, and levels of overlapping voxels:
+#use init pat_size to insert the levels of overlapping voxels:
+init = initiate_patterns_measures(c(0.1,1),act_lim,num_steps)
+overlap = init[[1]]; activation=init[[2]];all_msrs=init[[3]];
+#set pt_s:
+pt_s = 100
+#loop through pat size and activation levels
+for (iol in 1:length(overlap)) {
+    ol=overlap[iol]*pt_s
+    ol_inv=ceiling((1-overlap[iol])*pt_s)
+    #fprintf("ol: %f, ol_inv: %f\n",ol,ol_inv) #load pracma library for fprintf
+    for (iact in 1:length(activation)) {
+        act=activation[iact]
+        #that's the part to change in each simulation:
+        pat1 = c(rnorm(pt_s,1,0.1)) #cannot set pat1 to be at 1 all the time, because then sd will be 0 and cannot compute Pearson's R/Spearman, so I did from normal dist centered around 1, with minimal sd
+        pat2 = c(rep(1,times = ol_inv),rep(act,times = ol))
+        #fprintf("act: %f\n",act)
+        #fprintf("pat1: %d pat2: %d\n",length(pat1),length(pat2)) #load pracma library for fprintf
+        
+        #calculate each measure:
+        all_msrs = calc_msrs(iol,iact,pat1,pat2,all_msrs)
+}
+}
+
+#organize the data in one data frame and create the plot:
+p = plot_msrs(all_msrs,overlap,activation)
+
+#p[[1]] <- p[[1]] + ylab("% overlapping voxels")
+p[[2]] <- p[[2]] + xlab("% overlapping voxels")
+print(p[[1]])
+print(p[[2]])
+print(p[[3]])
+print(p[[4]])
+```
+
+#### comments to 6.2:
+
+### sim 7: change the percentage of overlapping voxels - and the level of activation, both patterns move
+#### e.g., [x,x,x,0,0,0] and [0,0,0,1,1,1] vs. [0,0,x,x,x,0] and [0,0,0,1,1,1]
+
+```{r sim7, warning = FALSE, message = FALSE}
+#loop through activation level, and levels of overlapping voxels:
+#use init pat_size to insert the levels of overlapping voxels:
+ns=c(10)
+init = initiate_patterns_measures(c(0.1,1),c(-1,1),ns)
+overlap = init[[1]]; activation=init[[2]];all_msrs=init[[3]];
+#set pt_s:
+pt_s = 40
+#loop through pat size and activation levels
+for (iol in 1:length(overlap)) {
+    ol=overlap[iol]*pt_s/2
+    ol_inv=ceiling((1-overlap[iol])*pt_s)/2
+    #fprintf("ol: %f, ol_inv: %f\n",ol,ol_inv) #load pracma library for fprintf
+    for (iact in 1:length(activation)) {
+        act=activation[iact]
+        #that's the part to change in each simulation:
+        pat1 = c(replicate(pt_s/2,0), replicate(pt_s/2,1))
+        pat2 = c(rep(act,times = ol_inv),rep(0, times = ol),rep(act,times = ol),rep(0, times = ol_inv))
+        #if (iact == 1) { print(pat2) }
+        #fprintf("act: %f\n",act)
+        #fprintf("pat1: %d pat2: %d\n",length(pat1),length(pat2)) #load pracma library for fprintf
+        
+        # hack for the ol_inv==0
+        # if (ol_inv==0) {
+        #   pat2=pat1
+        # }
+        #calculate each measure:
+        all_msrs = calc_msrs(iol,iact,pat1,pat2,all_msrs)
+}
+}
+
+#organize the data in one data frame and create the plot:
+p = plot_msrs(all_msrs,overlap,activation)
+
+#p[[1]] <- p[[1]] + ylab("% overlapping voxels")
+p[[2]] <- p[[2]] + xlab("% overlapping voxels")
+print(p[[1]])
+print(p[[2]])
+print(p[[3]])
+print(p[[4]])
+```
+
+#### comments on sim 7:
+
+1. _Pearons's r/Spearman rho_: when there's little overlap, but negative activation, the correlation is 1, because of the difference in the mean - that makes the patterns similar (e.g.[-1,-1,-1,0,0,0] and [0,0,0,1,1,1] become [-.5,-.5,-.5,0,0,0] and [-.5,-.5,-.5,0,0,0]).
+
+2. _ndp_: For the ndp, it doesn't matter, because the correction is to the total norm, rather than the average of the pattern. if there's little overlap - it'll be zero.
+
+*regarding our data*: I think that the middle graph (%overlap x-axis) is the most telling: both measures change with %overlap changes, and the norm_diff is ~0.
+More overlap, if in the same direction (positive) - increase both ndp and correlation. If more voxels point in opposite direction - decrease both.
+
+Changes in ndp can be either becuase there's more overlap (and same direction) to less overlap, per level of activation - i.e., from within/across there's a reduction in overlap.
+OR: change in direction - from negative to positive/deactivating voxels - like in sim 5.
+
+
+- similar to what we have seen before, but different than 6, becuase we do not change the total namber of activated voxels.
+
+## Questions
+1. Norm_diff is sensitive to the size of the ROI - different participants have different size of ROIs. We only look at differences within ROI, and differences from Rep1 to Rep5, but that means that participants with larger ROIs can create larger differences, and bias the results - so need to normalize to the size of the ROI per participant.
+
+2. what of this is useful?
+
+# FIGURE FOR THE PAPER:
+Currently, I present simulations 2.1, 5.1, 7 with 40 voxels.
+
+```{r FIGURE FOR THE PAPER: }
+pnt_size=2.5
+### plot for paper figure:
+plot_paper_fig <- function (all_msrs,pat_size,activation) {
+#don't plot the spearman correlation - didn't look any different.  
+r_all <- all_msrs[[1]][1,]
+r_all <- data.frame(r_all) %>% 
+  rename_(value = "r_all") %>%
+  add_column(activation = activation,
+             measure="Pearson")
+
+ndp_all <- all_msrs[[3]][1,] 
+ndp_all <- data.frame(ndp_all) %>% 
+  rename_(value = "ndp_all") %>%
+  add_column(activation = activation,
+             measure="ndp")
+ndiff_all <- all_msrs[[4]][1,] 
+ndiff_all <- data.frame(ndiff_all) %>% 
+  rename_(value = "ndiff_all")%>%
+  add_column(activation = activation,
+             measure = "norm_diff")
+
+comb_measures=rbind(r_all,ndp_all)
+comb_measures=rbind(comb_measures,ndiff_all)
+#plot:
+all_spectral<-brewer.pal(9,"Set1")
+myspec_all <- all_spectral[c(3,4,5)]
+#myspec2 <- all_spectral[c(1,3,4)]
+# labs(title = "half/half activation") +
+p <- ggplot(comb_measures, aes(x=activation,y=value,color=measure)) +
+            geom_line() +
+            geom_point(size=pnt_size) +
+            scale_color_manual(values = myspec_all) +
+            theme_classic() +
+            theme(legend.position = "none",
+                  axis.title.y = element_blank())
+return(p)  
+
+}
+
+plot_paper_fig_sim7 <- function (all_msrs,pat_size,activation) {
+  
+r_all <- all_msrs[[1]]
+ndp_all <- all_msrs[[3]] 
+ndiff_all <- all_msrs[[4]] 
+
+rownames(r_all) <- pat_size
+colnames(r_all) <- activation
+rownames(ndp_all) <- pat_size
+colnames(ndp_all) <- activation
+rownames(ndiff_all) <- pat_size
+colnames(ndiff_all) <- activation
+r_plot <- melt(r_all) %>% rename_(Pearsons_r = "value")
+ndp_plot <- melt(ndp_all) %>% rename_(ndp = "value")
+ndiff_plot <- melt(ndiff_all) %>% rename_(norm_diff = "value")
+comb_measures=merge(r_plot,ndp_plot, by= c("X1","X2"))
+comb_measures=merge(comb_measures,ndiff_plot, by= c("X1","X2")) %>%
+  rename_(num_voxels = "X1",
+          activation_level = "X2")
+
+comb_measures <- melt(comb_measures, id=c("num_voxels","activation_level")) %>%
+  rename_(measure = "variable")
+
+#plot:
+all_spectral<-brewer.pal(9,"Set1")
+myspec_all <- all_spectral[c(5,3,4)]
+
+p <- ggplot(comb_measures, aes(x=num_voxels,y=value,color=measure)) +
+            geom_line() +
+            geom_point(size=pnt_size) +
+            scale_color_manual(values = myspec_all) +
+            facet_wrap(~activation_level, ncol=2) +
+            xlab("% overlapping voxels") +
+            theme_classic() +
+            theme(strip.background = element_blank(),
+            strip.text.x = element_blank(),
+            legend.title = element_blank(),
+            axis.title.y = element_blank(),
+            legend.position="bottom")
+
+return(p)  
+
+}
+
+
+
+## sim 2.1:
+
+max_pat_size=c(40,40)
+init = initiate_patterns_measures(max_pat_size,act_lim,num_steps)
+pat_size = 40; activation=init[[2]];all_msrs=init[[3]];
+
+#loop through pat size and activation levels
+for (ipt_s in 1:length(pat_size)) {
+    pt_s=pat_size[ipt_s]
+    for (iact in 1:length(activation)) {
+        act=activation[iact]
+        
+        #that's the part to change in each simulation:
+        pat1 = c(replicate(pt_s/2,0), replicate(pt_s/2,1)) #
+        pat2 = c(replicate(pt_s/2,act),replicate(pt_s/2,0))
+        
+        #calculate each measure:
+        all_msrs = calc_msrs(ipt_s,iact,pat1,pat2,all_msrs)
+}
+}
+
+#plot:
+p1 = plot_paper_fig(all_msrs,pat_size,activation)
+
+##### sim 5.1
+max_pat_size=c(40,40)
+init = initiate_patterns_measures(max_pat_size,c(0.1,.9),num_steps)
+pat_size = 40; activation=init[[2]];all_msrs=init[[3]];
+
+#loop through pat size and activation levels
+for (ipt_s in 1:length(pat_size)) {
+    pt_s=pat_size[ipt_s]
+    for (iact in 1:length(activation)) {
+        act=activation[iact]*pt_s
+        act_inv=(1-activation[iact])*pt_s
+        #that's the part to change in each simulation:
+        pat1 = c(rnorm(pt_s,1,0.1)) #cannot set pat1 to be at 1 all the time, because then sd will be 0 and cannot compute Pearson's R/Spearman, so I did from normal dist centered around 1, with minimal sd
+        pat2 = c(rep(1,times = ceiling(act_inv)),rep(0,act))
+        # fprintf("pat1: %d",length(pat1)) #load pracma library for fprintf
+        # fprintf("pat2: %d\n",length(pat2))
+        #calculate each measure:
+        all_msrs = calc_msrs(ipt_s,iact,pat1,pat2,all_msrs)
+}
+}
+
+#organize the data in one data frame and create the plot:
+p2 = plot_paper_fig(all_msrs,pat_size,activation)
+
+p2 <- p2 + xlab("% deactivated voxels")
+
+## sim 7, overlap:
+#loop through activation level, and levels of overlapping voxels:
+#use init pat_size to insert the levels of overlapping voxels:
+ns=c(10,2)
+init = initiate_patterns_measures(c(0.1,1),c(-1,1),ns)
+overlap = init[[1]]; activation=init[[2]];all_msrs=init[[3]];
+#set pt_s:
+pt_s = 40
+#loop through pat size and activation levels
+for (iol in 1:length(overlap)) {
+    ol=overlap[iol]*pt_s/2
+    ol_inv=ceiling((1-overlap[iol])*pt_s)/2
+    #fprintf("ol: %f, ol_inv: %f\n",ol,ol_inv) #load pracma library for fprintf
+    for (iact in 1:length(activation)) {
+        act=activation[iact]
+        #that's the part to change in each simulation:
+        pat1 = c(replicate(pt_s/2,0), replicate(pt_s/2,1))
+        pat2 = c(rep(act,times = ol_inv),rep(0, times = ol),rep(act,times = ol),rep(0, times = ol_inv))
+        all_msrs = calc_msrs(iol,iact,pat1,pat2,all_msrs)
+}
+}
+
+
+#organize the data in one data frame and create the plot:
+p3 = plot_paper_fig_sim7(all_msrs,overlap,activation)
+
+grid.arrange(p1,p2,p3,nrow = 2,
+             layout_matrix = rbind(c(1, 2),c(3, 3)))
+#grid_arrange_shared_legend(p1, p2,p3)
+
+```
+# SIMULATION DG MODEL:
+```{r SIMULATION DG MODEL, warning = FALSE, message = FALSE}
+#1. Implement the inhibition idea.
+#2. Because there's some randomization in how inhibition influences and which voxels will be activated, need to run 500 times and average.
+
+num_it = 500
+act = 1
+# init = initiate_patterns_measures(c(0.1,1),act_lim,num_steps)
+# overlap = init[[1]]; activation=init[[2]];all_msrs=init[[3]];
+#set pt_s:
+pt_s = c(40,60) #number of voxels - should be divided by 10
+pos = 4 #per event
+per_act_vox = c(.10,.20) # c(.10,.20,.30,.40,.50) #percentage of activated voxels
+inhib = c(0,.2,.5,.8,1) #level of inhibition after 2 items
+
+#set up the result mat: within/across by gap (1-3), by num_it
+#names are not important - just so I'll remember what's the meaning:
+r_all=array(NA, c(2,(pos-1),num_it))
+spear_all=array(NA, c(2,(pos-1),num_it))
+ndp_all=array(NA, c(2,(pos-1),num_it))
+ndiff_all=array(NA, c(2,(pos-1),num_it))
+all_msrs = list(r_all,spear_all,ndp_all,ndiff_all)
+
+sum_msrs_all <- setNames(data.frame(matrix(ncol = 8, nrow = 0)), c("event","gap","mn","std","measure","per_act_vox","roi_size","inhibition"))
+
+ 
+#loop through pat size and activation levels
+for (curr_pts in pt_s) {
+  for (curr_actv in per_act_vox) {
+    for (curr_in in inhib) {
+    print(c(curr_pts,curr_actv,curr_in))
+    for (it in 1:num_it) {
+          pat = matrix(0, curr_pts, pos*2) #simulate two events
+          for (ev in c(1,2)) {
+            #randomly activate a small part of the pattern (DG, sparse coding):
+            rand_loc=sample(1:curr_pts,curr_pts*curr_actv)
+            #place in pos1:
+            pat[rand_loc,(ev-1)*pos + 1] = act
+            
+            #pos2 - the previous one are inhibited - choose random activation that is not of the previous items
+            curr_pos=2
+            rand_loc=sample(1:curr_pts,curr_pts*curr_actv)
+            prev1 = which(pat[,(ev-1)*pos + (curr_pos-1)] == act)
+            while (!is_empty(intersect(rand_loc,prev1))) {
+              rand_loc=sample(1:curr_pts,curr_pts*curr_actv)
+            }
+            pat[rand_loc,(ev-1)*pos + curr_pos] = act
+            
+            for (curr_pos in 3:pos) {
+              #pos3 - pos2 are inhibited, pos1 are semiinhibited:
+              #if the level of inhibition is by the second item .5, it means that
+              #.5 of the neurons can cross it (for example - if there's some distribution of strength of sum of inputs, .5 inhibition means that half of the sums are not enough to pass the inhibition, half are enough. That is like of the 12 activated, 6 will for sure not be activated, 6 can pass, but don't have to)
+              f_w = 0
+              prev1 = which(pat[,(ev-1)*pos + (curr_pos-1)] == act)
+              prev2 = which(pat[,(ev-1)*pos + (curr_pos-2)] == act)
+              rand_loc=sample(1:curr_pts,curr_pts*curr_actv)
+              while (!is_empty(intersect(rand_loc,prev1)) | (length(intersect(rand_loc,prev2)) > curr_pts*curr_actv*(1-curr_in))) { #inhib is the strength of inhibition. In this while loop is how many are allowed to be activated - so 1-inhib.
+                rand_loc=sample(1:curr_pts,curr_pts*curr_actv)
+              }
+              
+              #run a check - just to make sure:
+              if (length(union(rand_loc,prev1)) != curr_pts*curr_actv*2) {
+                print("while loop didn't work,rand_loc,prev1 overlap")
+                f_w = 1
+              }
+              if (length(intersect(rand_loc,prev2)) > curr_pts*curr_actv*(1-curr_in)) {
+                print("while loop didn't work,rand_loc,prev2 overlap is too large")
+                f_w = 1
+              }
+              #both conditions are fine - allocate:
+              if (f_w == 0) {
+                pat[rand_loc,(ev-1)*pos + curr_pos] = act
+              } else {
+                print('patterns are wrong, fix code')
+              }
+              
+          } #ends the loop for pos3/4
+        } #ends the loop for event 1/2
+        all_msrs = calc_msrs_dg(it,pat,all_msrs)
+        
+    } #ends the loop for number of iterations
+    curr_all_msrs <- df_msrs_dg(all_msrs)
+    curr_all_msrs$per_act_vox <- curr_actv
+    curr_all_msrs$roi_size <- curr_pts
+    curr_all_msrs$inhibition <- curr_in
+    sum_msrs_all <- rbind(sum_msrs_all,curr_all_msrs)  
+    } #ends the loop for inhibition level
+  } #ends the loop for activation level
+
+} #ends the loop for size of the pattern
+sum_msrs_all <- sum_msrs_all %>%
+  mutate(upper = mn + std,
+         lower = mn - std)
+
+#plot per measure and per activation level:
+all_spectral<-brewer.pal(11,"RdYlBu")
+myspec_within <-all_spectral[c(2,3,4)]
+#myspec_across <-all_spectral[c(10,9,8)] #blues
+all_spectral<-brewer.pal(9,"Greys")
+myspec_across <-all_spectral[c(4,5,6)] #greys
+myspec <-c(myspec_across[2],myspec_within[2])
+
+#y = sprintf('Similarity %s', subRep1_ttl), position_dodge(width = .9),
+#plot just the Peason's R
+# curr_msrs_d <- filter(sum_msrs_all,measure == "Pearson")
+# p1 <- ggplot(curr_msrs_d, aes(x = gap, y = mn,color = event)) +
+#   geom_pointrange(data = curr_msrs_d, mapping = aes(x = gap, y = mn, ymin=lower,ymax = upper),size=1) +
+#   labs(x = 'Temporal Distance', title = "Pearson, rows are %activated voxels, cols are ROI size") +
+#   scale_color_manual(values = myspec) +
+#   facet_grid(per_act_vox~roi_size,scales = "free") + 
+#   theme_all_gaps +
+#   theme(legend.position = "none",
+#         axis.title.y = element_blank()) 
+# 
+# curr_msrs_d <- filter(sum_msrs_all,measure == "ndp")
+# p2 <- ggplot(curr_msrs_d, aes(x = gap, y = mn,color = event)) +
+#   geom_pointrange(data = curr_msrs_d, mapping = aes(x = gap, y = mn, ymin=lower,ymax = upper),size=1) +
+#   labs(x = 'Temporal Distance', title = "ndp, rows are ROI size, cols are %activated voxels") +
+#   scale_color_manual(values = myspec) +
+#   facet_grid(per_act_vox~roi_size,scales = "free") + 
+#   theme_all_gaps +
+#   theme(legend.position = "none",
+#         axis.title.y = element_blank()) 
+
+#choose roi size:
+curr_sz = 60
+curr_msrs_d <- filter(sum_msrs_all,measure == "Pearson" & roi_size == curr_sz)
+p3 <- ggplot(curr_msrs_d, aes(x = gap, y = mn,color = event)) +
+  geom_pointrange(data = curr_msrs_d, mapping = aes(x = gap, y = mn, ymin=lower,ymax = upper),position = position_dodge(width = .4),size=1) +
+  labs(x = 'Temporal Distance', title = sprintf("Pearson, roi size: %s, rows are percentage activated voxels, cols are inhibition level",curr_sz)) +
+  scale_color_manual(values = myspec) +
+  facet_grid(per_act_vox~inhibition,scales = "free") + 
+  theme_all_gaps +
+  theme(legend.position = "none",
+        axis.title.y = element_blank()) 
+
+p3 <- ggplot(curr_msrs_d, aes(x = gap, y = mn,color = event)) +
+  geom_pointrange(data = curr_msrs_d, mapping = aes(x = gap, y = mn, ymin=lower,ymax = upper),position = position_dodge(width = .4),size=1) +
+  labs(x = 'Temporal Distance') +
+  scale_color_manual(values = myspec) +
+  facet_grid(per_act_vox~inhibition,scales = "free") + 
+  theme_all_gaps +
+  theme(legend.position = "none",
+        axis.title.y = element_blank()) 
+
+curr_msrs_d <- filter(sum_msrs_all,measure == "ndp" & roi_size == curr_sz)
+p4 <- ggplot(curr_msrs_d, aes(x = gap, y = mn,color = event)) +
+  geom_pointrange(data = curr_msrs_d, mapping = aes(x = gap, y = mn, ymin=lower,ymax = upper),position = position_dodge(width = .4),size=1) +
+  labs(x = 'Temporal Distance', title = sprintf("ndp, roi size: %s, rows are percentage activated voxels, cols are inhibition level",curr_sz)) +
+  scale_color_manual(values = myspec) +
+  facet_grid(per_act_vox~inhibition,scales = "free") + 
+  theme_all_gaps +
+  theme(legend.position = "none",
+        axis.title.y = element_blank()) 
+
+```
+### comments DG simulation:
+overall, seems to work. However, I get that within g3 is lower than within g2.
+1. different percentage of activated voxels didn't seem to matter (probably because inhibition is set as percentage of act voxels)
+2. check why larger ROIs do not work... or whether it just gets stuck sometimesd in the while loop
+3. Get a better intuition/explanation for the levels of inhibition

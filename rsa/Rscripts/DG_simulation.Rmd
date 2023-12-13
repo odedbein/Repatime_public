@@ -1,0 +1,527 @@
+---
+title: "vectore_like_simulations"
+output: html_document
+---
+
+#setup
+```{r setup, include=FALSE, echo=FALSE,warning = FALSE, message = FALSE}
+#warning = FALSE, message = FALSE
+#knitr::opts_chunk$set(echo = TRUE)
+
+# clear workspace
+rm(list = ls())
+
+library(knitr)
+
+#libraries for data handling:
+library(tidyverse)
+library(reshape) #for melt/cast
+library(Matrix) #A rich hierarchy of matrix classes, including triangular, symmetric, and diagonal matrices, both dense and sparse and with pattern, logical and numeric entries. Numerous methods for and operations on these matrices,
+library(standardize) #for the scale_by function
+
+library(geometry) #for the dot function (calculate inner product)
+#plotting:
+library(ggplot2)
+library(ggpubr) #built on ggplot2, I think i use it for the mean_se_ somthing - to show SEM on graphs.
+library(gridExtra) #that's for the grid.arrange
+
+#Create a custom color scale
+library(RColorBrewer)
+
+#theme for plot:
+theme_all_gaps <- theme_classic() +
+  theme(panel.border = element_rect(color = "black", fill = NA, size = 1),
+        axis.title.x = element_text(size = 26),
+        axis.text.x = element_text(size = 14),
+        axis.title.y = element_text(size = 26),
+        strip.text = element_text(size = 18),
+        title = element_text(size = 22),
+        legend.text = element_text(size = 18),
+        legend.title = element_blank(),
+        legend.position = c(0.8, 0.2),
+        legend.background = element_rect(fill= rgb(0.9,0.9,0.9)))
+
+
+```
+
+#DEFINE FUNCTIONS
+```{r define functions, include=FALSE, echo=FALSE,warning = FALSE, message = FALSE}
+#define norm_vec function
+norm_vec <- function(x) sqrt(sum(x^2))
+
+#default values:
+max_pat_size=200
+act_lim=2
+num_steps=10
+     
+#not in use - I left it here bc maybe the plotting things will be useful
+plot_msrs <- function (all_msrs,pat_size,activation) {
+  
+r_all <- all_msrs[[1]]
+spear_all <- all_msrs[[2]]
+ndp_all <- all_msrs[[3]] 
+ndiff_all <- all_msrs[[4]] 
+
+rownames(r_all) <- pat_size
+colnames(r_all) <- activation
+rownames(spear_all) <- pat_size
+colnames(spear_all) <- activation
+rownames(ndp_all) <- pat_size
+colnames(ndp_all) <- activation
+rownames(ndiff_all) <- pat_size
+colnames(ndiff_all) <- activation
+r_plot <- melt(r_all) %>% rename_(Pearsons_r = "value")
+spear_plot <- melt(spear_all) %>% rename_(Spearman_rho = "value")
+ndp_plot <- melt(ndp_all) %>% rename_(ndp = "value")
+ndiff_plot <- melt(ndiff_all) %>% rename_(norm_diff = "value")
+comb_measures=merge(r_plot,ndp_plot, by= c("X1","X2"))
+comb_measures=merge(comb_measures,spear_plot, by= c("X1","X2"))
+comb_measures=merge(comb_measures,ndiff_plot, by= c("X1","X2")) %>%
+  rename_(num_voxels = "X1",
+          activation_level = "X2")
+
+comb_measures <- melt(comb_measures, id=c("num_voxels","activation_level")) %>%
+  rename_(measure = "variable")
+
+#plot:
+all_spectral<-brewer.pal(9,"Set1")
+myspec_all <- all_spectral[c(1,3,4,5)]
+myspec2 <- all_spectral[c(1,3,4)]
+# labs(title = "half/half activation") +
+p_all.1 <- ggplot(comb_measures, aes(x=activation_level,y=value,color=measure)) +
+            geom_line() +
+            geom_point() +
+            scale_color_manual(values = myspec_all) +
+            facet_wrap(~num_voxels, nrow=2) +
+            theme_classic()
+
+p_all.2 <- ggplot(comb_measures, aes(x=num_voxels,y=value,color=measure)) +
+            geom_line() +
+            geom_point() +
+            scale_color_manual(values = myspec_all) +
+            facet_wrap(~activation_level, nrow = 2) +
+            theme_classic()
+
+#plot only one graph with Pearson's r and ndp:
+sel_msr <- filter(comb_measures,comb_measures$num_voxels==pat_size[5] & !(comb_measures$measure == "norm_diff")) # && comb_measures$measure != "norm_diff"
+p_ndp_r <- ggplot(sel_msr, aes(x=activation_level,y=value,color=measure)) +
+            geom_line() +
+            geom_point() +
+            scale_color_manual(values = myspec2) +
+            theme_classic()
+
+
+sel_msr <- filter(comb_measures, comb_measures$measure == "ndp") # 
+sel_msr <- sel_msr %>% rename_(overlapping_voxels = "num_voxels")
+p_ndp <- ggplot(sel_msr, aes(x=activation_level,y=value,alpha=overlapping_voxels, color = measure)) +
+            #geom_line() +
+            geom_point() +
+            scale_color_manual(values = all_spectral[3]) +
+            theme_classic()
+
+p=list(p_all.1,p_all.2,p_ndp_r,p_ndp)
+return(p)  
+
+}
+
+
+###### functions for DG simulation:
+calc_msrs_dg <- function (it,pat,rep,all_msrs) {
+
+#within gap1:
+save_cors=array(NA,c(4,3))
+for (x in c(1,2,3)) {
+  pat1=pat[,x];pat2=pat[,(x+1)]
+  save_cors[1,x]=cor(pat1,pat2,method = "pearson")
+  save_cors[2,x]=cor(pat1,pat2,method = "spearman")
+  save_cors[3,x]=dot(pat1,pat2)/(norm_vec(pat1)*norm_vec(pat2)) #ndp
+  save_cors[4,x]=abs(norm_vec(pat1)-norm_vec(pat2)) #ndiff_all
+}
+for (ms in 1:4) {
+ all_msrs[[ms]][1,1,rep,it]=mean(save_cors[ms,]) 
+}
+
+#within gap2:
+save_cors=array(NA,c(4,2))
+for (x in c(1,2)) {
+  pat1=pat[,x];pat2=pat[,(x+2)]
+  save_cors[1,x]=cor(pat1,pat2,method = "pearson")
+  save_cors[2,x]=cor(pat1,pat2,method = "spearman")
+  save_cors[3,x]=dot(pat1,pat2)/(norm_vec(pat1)*norm_vec(pat2)) #ndp
+  save_cors[4,x]=abs(norm_vec(pat1)-norm_vec(pat2)) #ndiff_all
+}
+for (ms in 1:4) {
+ all_msrs[[ms]][1,2,rep,it]=mean(save_cors[ms,]) 
+}
+
+#within gap3:
+save_cors=array(NA,4)
+pat1=pat[,1];pat2=pat[,4]
+save_cors[1]=cor(pat1,pat2,method = "pearson")
+save_cors[2]=cor(pat1,pat2,method = "spearman")
+save_cors[3]=dot(pat1,pat2)/(norm_vec(pat1)*norm_vec(pat2)) #ndp
+save_cors[4]=abs(norm_vec(pat1)-norm_vec(pat2)) #ndiff_all
+for (ms in 1:4) {
+ all_msrs[[ms]][1,3,rep,it]=mean(save_cors[ms]) 
+}
+
+#across gap1:
+save_cors=array(NA,4)
+pat1=pat[,4];pat2=pat[,5]
+save_cors[1]=cor(pat1,pat2,method = "pearson")
+save_cors[2]=cor(pat1,pat2,method = "spearman")
+save_cors[3]=dot(pat1,pat2)/(norm_vec(pat1)*norm_vec(pat2)) #ndp
+save_cors[4]=abs(norm_vec(pat1)-norm_vec(pat2)) #ndiff_all
+for (ms in 1:4) {
+ all_msrs[[ms]][2,1,rep,it]=mean(save_cors[ms]) 
+}
+
+#across gap2:
+save_cors=array(NA,c(4,2))
+for (x in c(3,4)) {
+  pat1=pat[,x];pat2=pat[,(x+2)]
+  save_cors[1,x-2]=cor(pat1,pat2,method = "pearson")
+  save_cors[2,x-2]=cor(pat1,pat2,method = "spearman")
+  save_cors[3,x-2]=dot(pat1,pat2)/(norm_vec(pat1)*norm_vec(pat2)) #ndp
+  save_cors[4,x-2]=abs(norm_vec(pat1)-norm_vec(pat2)) #ndiff_all
+}
+for (ms in 1:4) {
+ all_msrs[[ms]][2,2,rep,it]=mean(save_cors[ms,]) 
+}
+
+#across gap3:
+save_cors=array(NA,c(4,3))
+for (x in c(2,3,4)) {
+  pat1=pat[,x];pat2=pat[,(x+3)]
+  save_cors[1,x-1]=cor(pat1,pat2,method = "pearson")
+  save_cors[2,x-1]=cor(pat1,pat2,method = "spearman")
+  save_cors[3,x-1]=dot(pat1,pat2)/(norm_vec(pat1)*norm_vec(pat2)) #ndp
+  save_cors[4,x-1]=abs(norm_vec(pat1)-norm_vec(pat2)) #ndiff_all
+}
+for (ms in 1:4) {
+ all_msrs[[ms]][2,3,rep,it]=mean(save_cors[ms,]) 
+}
+
+
+return(all_msrs)
+
+}     
+
+
+df_msrs_dg <- function (all_msrs) {
+
+msrs <- c("Pearson","Spearman","ndp","norm_diff")
+sum_msrs <- setNames(data.frame(matrix(ncol = 6, nrow = 0)), c("X1","X2","X3","mn","std","measure"))
+
+for (curr_msr in 1:4) {
+j=all_msrs[[curr_msr]]
+j_mn <- apply(j, c(1,2,3), mean)
+j_sd <- apply(j, c(1,2,3), sd)
+
+rownames(j_mn) <- c("within","across")
+colnames(j_mn) <- c(1,2,3)
+rownames(j_sd) <- c("within","across")
+colnames(j_sd) <- c(1,2,3)
+
+j_mn <- melt(j_mn) %>% rename_(mn = "value")
+j_sd <- melt(j_sd) %>% rename_(std = "value")
+j <- merge(j_mn,j_sd, by= c("X1","X2","X3"))
+j$measure <- msrs[curr_msr]
+
+sum_msrs <- rbind(sum_msrs,j)
+}
+
+sum_msrs <- sum_msrs %>%
+  rename_(event = "X1",
+          gap = "X2",
+          repetition = "X3")
+
+return(sum_msrs)
+
+}
+```
+# voxel nums left CA3 and left DG:
+>based on (in matlab):
+load('/Volumes/data/Bein/Repatime/repatime_scanner/results/encoding/rsa/no_smooth/filtered100s_mtc_clean_mc_wmcsf_3sphere/hipp_voxel_numbers.mat')
+
+>left ca23_025: mean: 39.41, SD: 8.88 range (across subs): 21-60
+
+>left dg_025: mean: 47.8, SD: 9.82 range (across subs): 30-68
+
+
+# SIMULATION DG MODEL:
+### reactivate patterns across reps - don't replace units
+This model is currently reported (Jan 2023), for the submission after NN.
+```{r SIMULATION DG MODEL reactivate patterns no replacements of units, warning = FALSE, message = FALSE}
+#1. Implement the inhibition idea.
+#2. Because there's some randomization in how inhibition influences and which voxels will be activated, need to run 500 times and average.
+#3. added after NN submission: a problem with the previous model was that it didn't incorporate learning, so we changed this
+num_it = 500
+act = 1
+# init = initiate_patterns_measures(c(0.1,1),act_lim,num_steps)
+# overlap = init[[1]]; activation=init[[2]];all_msrs=init[[3]];
+#set pt_s:
+pt_s = c(40,50,60) #number of voxels - should be divided by 10
+pos = 4 #per event
+per_act_vox = c(.10,.20) # c(.10,.20,.30,.40,.50) #percentage of activated voxels -make sure pt_s devides well
+n_rep=5
+initial_inhib=.5 
+increase_inhib=(1-initial_inhib)/(n_rep-1) #to have a total of n_rep-1 reach to inhib1
+#another option inhibition is a log increase with a base of number of reps - to reach 1 in rep 5.
+
+#inhib = c(0,.25,.5,.75,1) #level of inhibition of the n+1 item - per each repetition
+#just linear increase from 0 to 1.
+
+inhib_scale = c(.15,.2,.25) #exponential decay factor - the higher the quicker inhibition decays.
+#I thought that exponential makes more sense than linear.
+#inhibition is calculated based on: inhib*exp(-inhib_scale*(x-1)), where x is the gap between the items
+#for a gap of 1, exp(0)=1, so it's just inhib.
+
+#set up the result mat: within/across by gap (1-3), by num_it
+#names are not important - just so I'll remember what's the meaning:
+r_all=array(NA, c(2,(pos-1),n_rep,num_it))
+spear_all=array(NA, c(2,(pos-1),n_rep,num_it))
+ndp_all=array(NA, c(2,(pos-1),n_rep,num_it))
+ndiff_all=array(NA, c(2,(pos-1),n_rep,num_it))
+all_msrs = list(r_all,spear_all,ndp_all,ndiff_all)
+
+sum_msrs_all <- setNames(data.frame(matrix(ncol = 9, nrow = 0)), c("event","gap","rep","mean","std","measure","per_act_vox","roi_size","inhib_decay_factor"))
+
+ 
+#loop through pat size and activation levels
+for (curr_pts in pt_s) {
+  for (curr_actv in per_act_vox) {
+    for (curr_in_sc in inhib_scale) {
+    print(c(curr_pts,curr_actv,curr_in_sc))
+    for (it in 1:num_it) { #per each iteration, run through all reps:
+      
+      for (rep in 1:n_rep) { #n_rep
+        #print(sprintf("##### REP %.0f ######", rep))
+          #currently - the only thing that changes across reps is the level of
+          #inhibition. The activity pattern for each item is randomly generated each time. Basically, that shouldn't matter for the correlation if it's the same patterns or not in each repetition. If I want to change,I need to think about which neurons are activated again from the prior repetition, and how that works if some of them should be inhibited.
+          pat = matrix(0, curr_pts, pos*2) #make place holder for two events
+          for (ev in c(1,2)) {
+            #for the first position, if first rep, generate a random pattern,
+            #if later reps, activate the previous rep pattern (that means that the pattern will be the same for first items across all reps, currently no noise is in the system)
+            if (rep == 1) {
+              #randomly activate a small part of the pattern (DG, sparse coding):
+              rand_loc=sample(1:curr_pts,curr_pts*curr_actv)
+              #place in pos1:
+              pat[rand_loc,(ev-1)*pos + 1] = act
+            } else {
+              #print('allocating prev rep')
+              pat[,(ev-1)*pos + 1] = prev_pat[,(ev-1)*pos + 1]
+            }
+              
+            #loop through positions:
+            for (curr_pos in 2:pos) {
+              #check overlap with previous items in the event:
+              ch_overlap = 1
+              
+              #now check, until overlap is satisfied:
+              while (ch_overlap == 1) {
+                if (rep == 1) {
+                  #randomly activate a small part of the pattern (DG, sparse coding):
+                  curr_pat=sample(1:curr_pts,curr_pts*curr_actv)
+                  #place in pos:
+                  #pat[rand_loc,(ev-1)*pos + curr_pos] = act
+                } else {
+                  #print('allocating prev rep')
+                  curr_pat=which(prev_pat[,(ev-1)*pos + curr_pos] == act)
+                  #pat[,(ev-1)*pos + curr_pos] = prev_pat[,(ev-1)*pos + curr_pos]
+                }
+                
+                ch_overlap = 0 #assume it's fine
+                #now start checking looping through previous items:
+                #basically, it could be fine, or not - because inhibition level increased.
+                #If not - replace overlap with non-overlapping units.
+                #I do that, rather than just removing inhibited units, because that's what our univar and norm-diff data showed:
+                #no univar or norm-diff differences across gaps.
+                for (back_gap in 1:(curr_pos-1)){
+                  # print("curr_pat:")
+                  # print(curr_pat)
+                  #print(sprintf("back_gap is: %.0f", back_gap))
+                  prev = which(pat[,(ev-1)*pos + (curr_pos-back_gap)] == act) #find the ones activated in the previous item
+                  #curr_pat = which(pat[,(ev-1)*pos + curr_pos] == act) #either determined by rand_loc, or by previous repetition. Also changed inside this loop.
+                  #set inhibition level depending on distance from current item:
+                  #logarithmic increase in initial rep - that didn't work so well,
+                  #curr_in = log(rep,base=n_rep)*(exp(-curr_in_sc*(back_gap-1))) 
+                  #the data shows a linear increase. let's do that:
+                  curr_in = (initial_inhib+(rep-1)*increase_inhib)*
+                    (exp(-curr_in_sc*(back_gap-1))) #set current level of initial inhibition, based on rep, and gap
+                  #print(sprintf("curr_in is: %.2f", curr_in))
+                  #how much overlap:
+                  replace_pat=ceiling(length(intersect(curr_pat,prev)) - curr_pts*curr_actv*(1-curr_in)) #if the number of activated units allowed is not an integer, needs to ceil so that we'll have enough units replaced.
+                  if (replace_pat > 0) { #more than allowed by inhibition levels
+                    
+                    #of the intersect, sample the ones to take out, at the number that needs to be replaced:
+                    #print(intersect(curr_pat,prev))
+                    #sample has undesired behavior if the vector it samples from is of length=1, so:
+                    if (length(intersect(curr_pat,prev)) == 1) {
+                      zero_loc=intersect(curr_pat,prev) #replace the one that is the overlap
+                    } else { #if longer, sample
+                      zero_loc=sample(intersect(curr_pat,prev),replace_pat)
+                    }
+                    
+                    # print("zero_loc:")
+                    # print(zero_loc)
+                    #remove them from curr_pat
+                    curr_pat=curr_pat[!(curr_pat %in% zero_loc)]
+                    
+                    if (length(curr_pat) > curr_pts*curr_actv) {
+                      print("curr_pat is too long, allocation didn't work")
+                      # print("new_loc:")
+                      # print(new_loc)
+                      # print("zero_loc:")
+                      # print(zero_loc)
+                      # print("curr_pat:")
+                      # print(curr_pat)
+                    }
+                  } #ends the replace_pat if
+                } #ends the for loop for checking back_gap
+                #this process can still fault, because it might be we'll replace for overlap btw pos1 and pos3
+                #but create overlap btw pos2 and pos3.
+                #For now, I don't correct for this explicitly. I check, and if it happened, I sample again.
+                
+                
+                #check if everything is okay:
+                for (back_gap in 1:(curr_pos-1)){
+                  #print(sprintf("back_gap is: %.0f", back_gap))
+                  prev = which(pat[,(ev-1)*pos + (curr_pos-back_gap)] == act) #find the ones activated in the previous item
+                  #curr_pat = which(pat[,(ev-1)*pos + curr_pos] == act) #either determined by rand_loc, or by previous repetition
+                  #set inhibition level depending on distance from current item:
+                  #logaritmic increase didn't work, data is more linear:
+                  #curr_in = log(rep,base=n_rep)*(exp(-curr_in_sc*(back_gap-1)))
+                  curr_in = (initial_inhib+(rep-1)*increase_inhib)*
+                    (exp(-curr_in_sc*(back_gap-1))) #set current level of initial inhibition, based on rep, and gap
+                  
+                  #print(sprintf("curr_in is: %.2f", curr_in))
+                  #how much overlap:
+                  replace_pat=length(intersect(curr_pat,prev)) - curr_pts*curr_actv*(1-curr_in) #this is a check - no need to ceil, should be zero or lower.
+                  if (replace_pat > 0) { #more than allowed by inhibition levels
+                    ch_overlap = 1
+                    #print('found overlap, shuffling')
+                    break #no need to continue checking more items if one is not good.
+                  } #ends the if for checking if overlap is bigger than needed.
+                } #ends the loop for checking back_gap
+              } #ends the while loop for ch_overlap
+              
+              #double check all previous items - just to make sure:
+              f_w = 0
+              for (back_gap in 1:(curr_pos-1)){
+                  prev = which(pat[,(ev-1)*pos + (curr_pos-back_gap)] == act)
+                  #curr_pat = which(pat[,(ev-1)*pos + curr_pos] == act)
+                  #logaritmic increase didn't work, data is more linear:
+                  #curr_in = log(rep,base=n_rep)*(exp(-curr_in_sc*(back_gap-1)))
+                  curr_in = (initial_inhib+(rep-1)*increase_inhib)*
+                    (exp(-curr_in_sc*(back_gap-1))) #set current level of initial inhibition, based on rep, and gap
+              
+                  if (length(intersect(curr_pat,prev)) > curr_pts*curr_actv*(1-curr_in)) {
+                    print("while loop didn't work")
+                    f_w = 1
+                  }
+              } #ends the loop for double checking previous items
+                  
+              #all previous items are fine - allocate:
+              if (f_w == 0) {
+                pat[curr_pat,(ev-1)*pos + curr_pos] = act
+              } else {
+                print('patterns are wrong, fix code')
+              }
+              
+          } #ends the loop of pos 2:pos
+        } #ends the loop for event 1/2
+          
+        #calculate all the measures, per iteration:
+        all_msrs = calc_msrs_dg(it,pat,rep,all_msrs)
+        #save the pat for the next rep:
+        prev_pat <- pat
+      } #ends the loop for repetition
+    } #ends the loop for number of iterations
+    
+    #save, and save the params:
+    curr_all_msrs <- df_msrs_dg(all_msrs)
+    curr_all_msrs$per_act_vox <- curr_actv
+    curr_all_msrs$roi_size <- curr_pts
+    curr_all_msrs$inhibition <- curr_in_sc
+    sum_msrs_all <- rbind(sum_msrs_all,curr_all_msrs)  
+    } #ends the loop for inhibition decay level
+  } #ends the loop for activation level
+} #ends the loop for size of the pattern
+
+sum_msrs_all <- sum_msrs_all %>%
+  mutate(upper = mn + std,
+         lower = mn - std)
+
+```
+### Plot DG simulations
+```{r plot DG simulations}
+#plot per measure and per activation level:
+all_spectral<-brewer.pal(11,"RdYlBu")
+myspec_within <-all_spectral[c(2,3,4)]
+#myspec_across <-all_spectral[c(10,9,8)] #blues
+all_spectral<-brewer.pal(9,"Greys")
+myspec_across <-all_spectral[c(4,5,6)] #greys
+myspec <-c(myspec_across[2],myspec_within[2])
+
+#choose roi size:
+curr_sz = 50
+curr_in = .15
+curr_msrs_d <- filter(sum_msrs_all,measure == "Pearson" & roi_size == curr_sz & inhibition == curr_in)
+p3 <- ggplot(curr_msrs_d, aes(x = gap, y = mn,color = event)) +
+  geom_pointrange(data = curr_msrs_d, mapping = aes(x = gap, y = mn, ymin=lower,ymax = upper),position = position_dodge(width = .4),size=1) +
+  labs(x = 'Temporal Distance', title = sprintf("Pearson, roi size: %s, rows are percentage activated voxels, cols are repetition",curr_sz)) +
+  scale_color_manual(values = myspec) +
+  facet_grid(per_act_vox~repetition,scales = "free") + 
+  theme_all_gaps +
+  theme(legend.position = "none",
+        axis.title.y = element_blank()) 
+
+#plot only activation level of .2, different inhibition:
+#choose roi size:
+curr_sz = 50
+curr_actv = .2
+curr_msrs_d <- filter(sum_msrs_all,measure == "Pearson" & roi_size == curr_sz & per_act_vox == curr_actv)
+p3 <- ggplot(curr_msrs_d, aes(x = gap, y = mn,color = event)) +
+  geom_pointrange(data = curr_msrs_d, mapping = aes(x = gap, y = mn, ymin=lower,ymax = upper),position = position_dodge(width = .4),size=1) +
+  labs(x = 'Temporal Distance', title = sprintf("Pearson, roi size: %s, rows are inhibition decay, cols are repetition",curr_sz)) +
+  scale_color_manual(values = myspec) +
+  facet_grid(inhibition~repetition,scales = "free") + 
+  theme_all_gaps +
+  theme(legend.position = "none",
+        axis.title.y = element_blank()) 
+
+#plot only rep5, across inhibition levels and roi sizes:
+curr_actv = .2
+curr_msrs_d <- filter(sum_msrs_all,measure == "Pearson" & repetition == 5 & per_act_vox == curr_actv)
+
+p_rep5 <- ggplot(curr_msrs_d, aes(x = gap, y = mn,color = event)) +
+  geom_pointrange(data = curr_msrs_d, mapping = aes(x = gap, y = mn, ymin=lower,ymax = upper),position = position_dodge(width = .4),size=1) +
+  labs(x = 'Temporal Distance', title = sprintf("Pearson, Rep 5, rows are inhibition decay, cols are roi size")) +
+  scale_color_manual(values = myspec) +
+  facet_grid(inhibition~roi_size,scales = "free") + 
+  theme_all_gaps +
+  theme(legend.position = "none",
+        axis.title.y = element_blank()) 
+
+
+# p3 <- ggplot(curr_msrs_d, aes(x = gap, y = mn,color = event)) +
+#   geom_pointrange(data = curr_msrs_d, mapping = aes(x = gap, y = mn, ymin=lower,ymax = upper),position = position_dodge(width = .4),size=1) +
+#   labs(x = 'Temporal Distance') +
+#   scale_color_manual(values = myspec) +
+#   facet_grid(per_act_vox~inhibition,scales = "free") + 
+#   theme_all_gaps +
+#   theme(legend.position = "none",
+#         axis.title.y = element_blank()) 
+# 
+# curr_msrs_d <- filter(sum_msrs_all,measure == "ndp" & roi_size == curr_sz)
+# p4 <- ggplot(curr_msrs_d, aes(x = gap, y = mn,color = event)) +
+#   geom_pointrange(data = curr_msrs_d, mapping = aes(x = gap, y = mn, ymin=lower,ymax = upper),position = position_dodge(width = .4),size=1) +
+#   labs(x = 'Temporal Distance', title = sprintf("ndp, roi size: %s, rows are percentage activated voxels, cols are inhibition level",curr_sz)) +
+#   scale_color_manual(values = myspec) +
+#   facet_grid(per_act_vox~inhibition,scales = "free") + 
+#   theme_all_gaps +
+#   theme(legend.position = "none",
+#         axis.title.y = element_blank())
+
+```

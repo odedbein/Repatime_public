@@ -1,0 +1,1348 @@
+---
+title: "Repatime_rsa_analyses"
+output: html_document
+---
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+# set up
+```{r setup, include=FALSE,  cache = FALSE, warning = TRUE, message = TRUE, error = TRUE}
+
+# clear workspace
+rm(list = ls())
+
+# set knitr options
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(echo = FALSE)
+
+#data
+model='filtered100s_mtc_clean_mc_wmcsf_3sphere'
+results_dir <- sprintf("/Volumes/data/Bein/Repatime/repatime_scanner/results/encoding/rsa/no_smooth/%s/voxel_removed/FilesForR_outlier_corr_removed",model)
+
+knitr::opts_knit$set(root.dir = results_dir)
+library(tidyverse)
+library(Matrix)
+library(lme4)
+library(effsize)
+library(ggplot2)
+library(knitr)
+library(reshape)
+library(standardize)
+library(optimx)
+library(ggpubr)
+library(gridExtra) #that's for the grid.arrange
+
+#rstan and brms:
+# library("rstan")
+# options(mc.cores = parallel::detectCores())
+# rstan_options(auto_write = TRUE)
+# library(brms)
+#these we need for ploting models predictions
+library(ggeffects)
+library(sjPlot)
+library(sjmisc)
+library(sjstats)
+
+#Create a custom color scale
+library(RColorBrewer)
+#to view the paletts:
+#display.brewer.all(5)
+#repetition colors - adapted:
+repetition_colors <- c(rgb(1,	0.807843137254902,	0.823529411764706),
+rgb(0.886274509803922,	0.305882352941177,	0.320588235294118),
+rgb(0.772549019607843,	0.203921568627451,	0.217647058823529),
+rgb(0.658823529411765,	0.101960784313725,	0.114705882352941),
+rgb(0.35098039215686,	0,	0.0057647058823529))
+ 
+#names(repetition_colors) <- unique(curr_data$repetition)
+
+############# set up themes:
+theme_gap <- theme_classic() +
+   theme(panel.border = element_rect(color = "black", fill = NA, size = 1),
+        axis.title.x = element_text(size = 18),
+        axis.text.x = element_text(size = 14),
+        axis.title.y = element_text(size = 18),
+        strip.text = element_text(size = 14),
+        title = element_text(size = 18),
+        legend.text = element_text(size = 14))
+
+theme_all_gaps <- theme_classic() +
+  theme(panel.border = element_rect(color = "black", fill = NA, size = 1),
+        axis.title.x = element_text(size = 26),
+        axis.text.x = element_text(size = 14),
+        axis.title.y = element_text(size = 26),
+        strip.text = element_text(size = 18),
+        title = element_text(size = 22),
+        legend.text = element_text(size = 18),
+        legend.title = element_blank(),
+        legend.position = c(0.8, 0.2),
+        legend.background = element_rect(fill= rgb(0.9,0.9,0.9)))
+
+theme_TestRTcorr <- theme_classic() +
+  theme(axis.title.x = element_text(size = 20),
+        axis.text.x = element_text(size = 12),
+        axis.title.y = element_text(size = 16),
+        strip.text = element_text(size = 16),
+        title = element_text(size = 20),
+        plot.title = element_text(hjust = 0.5))
+
+```
+
+# Load behavioral data and models
+```{r load data}
+
+setwd(results_dir)
+
+model_encRT_data <- read.table(paste(results_dir, "behavior_models", "model_and_encoding_RTms.txt", sep="/"),header = TRUE,sep = "\t",dec = ".")
+model_TempTestRT_data <- read.table(paste(results_dir, "behavior_models", "model_and_TemporalTest_quick100ms_RTms.txt", sep="/"),header = TRUE,sep = "\t",dec = ".")
+model_TempTestRT_data5reps = model_TempTestRT_data[FALSE,FALSE]
+
+#the file for Temporal test didn't include 5 reps. But, if we want to choose items from encoding RSA based on temporal_test, we need it:
+#set up the temporal test, but multiply to 5 reps:
+for (l in 1:6) {
+  #print(sprintf("analysis for %s:",curr_roi))
+  #curr_data <- model_TempTestRT_data %>% filter(list == l) #%>%
+  model_TempTestRT_data5reps <- bind_rows(model_TempTestRT_data5reps , replicate(5, filter(model_TempTestRT_data, list == l), simplify = FALSE))
+
+}
+#now add the repetition
+model_TempTestRT_data5reps <- mutate(model_TempTestRT_data5reps, repetition=model_encRT_data$repetition)
+
+#load simMAT and factorise:
+model_simMAT <- read.table(paste(results_dir, "behavior_models", "encoding_model_for_simMat.txt", sep="/"),header = TRUE,sep = "\t",dec = ".")
+
+model_simMAT <- model_simMAT %>%
+  mutate(fac_list = factor(model_simMAT$list),
+        subID = factor(model_simMAT$subject),
+        fac_rep = factor(model_simMAT$repetition), #,
+        fac_event_mdl = factor(model_simMAT$event_model),
+        fac_wa_control_time = factor(model_simMAT$wa_control_time),
+        fac_color_mdl = factor(model_simMAT$color_model),
+        fac_event_pos_item1 = factor(model_simMAT$event_pos_item1),
+        fac_event_pos_item2 = factor(model_simMAT$event_pos_item2),
+        position_code = factor(fac_event_pos_item1==fac_event_pos_item2),
+        boundary_effect = ifelse(model_simMAT$event_pos_item1 == 1, 1,0))
+  
+ 
+```
+# Interaction btw rois
+### grab the data
+```{r analyse entire simMAT}
+
+#list of files - these are all the regions:
+analysis_reg= "hipp"  
+allfiles <- list.files(path = paste(results_dir, "regions_data", sep="/"), pattern = sprintf("%s*",analysis_reg), all.files = FALSE, full.names = TRUE, recursive = FALSE)
+
+#take only simMAT:
+curr_all_files=allfiles[seq(3,length(allfiles), by = 3)]
+#lca23_025: 13
+#ldg_025: 16
+#rca23_025: 23
+#rdg_025: 26
+
+#hack to initiate an empty frame:
+#all_reg_data <- model_simMAT[FALSE,FALSE]
+
+regs=c(13,16,23,26)
+for (reg in regs ) {
+curr_file=curr_all_files[reg]
+fname = basename(curr_file)
+#get the roi:
+roi <- substr(fname,10,regexpr('_025', fname)-1) #get the roi name
+hemi <- substr(fname,9,9)
+print(sprintf("roi is %s, hemi is %s ",roi, hemi))
+
+#get the data
+brain_data <- read.table(curr_file, header = TRUE,sep = "\t",dec = ".")
+curr_data <- bind_cols(model_simMAT, brain_data)
+
+#remove NA:
+curr_data <- filter(curr_data, !is.na(curr_data$thirdTR))
+
+curr_data$reg_name <- roi
+curr_data$hemi <- hemi
+if (reg == 13) {
+  all_reg_data <- curr_data
+} else {
+  all_reg_data <- bind_rows(all_reg_data, curr_data)
+}
+
+} #ends the loop for rois
+ 
+```
+### analyse the interaction
+```{r analyse the interaction}
+
+#event_mdl_control time - within is 2, across is 1
+curr_data <- filter(all_reg_data, all_reg_data$wa_control_time != 0)
+
+#if excluding rep1:
+#curr_data <- filter(curr_data, curr_data$repetition > 1)
+
+#this is currently reported in dissertation chapter, with all repetitions:
+null_mdl=lmer(thirdTR ~ fac_wa_control_time*reg_name + fac_wa_control_time*hemi + hemi*reg_name + gap + fac_list + (1|subID),curr_data,REML=F)
+
+full_mdl=lmer(thirdTR ~ fac_wa_control_time*reg_name*hemi+ gap + fac_list + (1|subID),curr_data,REML=F)
+
+summary(full_mdl)
+print(anova(full_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(full_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+
+#has an interaction of event by roi by hemi, so examine each hemi separately:
+for (hemis in c('r','l')) {
+  d=curr_data[curr_data$hemi == hemis,]
+  
+  null_mdl=lmer(thirdTR ~ fac_wa_control_time + reg_name+ gap + fac_list + (1|subID),d,REML=F)
+
+  full_mdl=lmer(thirdTR ~ fac_wa_control_time*reg_name+ gap + fac_list + (1|subID),d,REML=F)
+  
+  print(sprintf("#### event * roi for %s hemi: ####",hemis))
+  
+  #summary(full_mdl)
+  print(anova(full_mdl,null_mdl))
+  AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(full_mdl)[2])
+  print(sprintf("AIC diff: %.2f",AIC_diff))
+
+}
+
+#these analyses in each hemi revealed an interaction in the left hemi, nothing in the right hemi. so further analyses were limited to the left hemi - see next chunk.
+
+#in Rep5, we wanted to establish that the event*roi is sig:
+d=curr_data[curr_data$hemi == 'l',]
+curr_rep_data <- filter(d, d$repetition == 5)
+
+null_mdl=lmer(thirdTR ~ fac_wa_control_time + reg_name + gap + fac_list + (1|subID),curr_rep_data,REML=F)
+
+full_mdl=lmer(thirdTR ~ fac_wa_control_time*reg_name + gap + fac_list + (1|subID),curr_rep_data,REML=F)
+
+summary(full_mdl)
+print(anova(full_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(full_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+
+#by the way, the gap*event*roi is not:
+null_mdl=lmer(thirdTR ~ fac_wa_control_time*reg_name + fac_wa_control_time*gap + gap*reg_name + fac_list + (1|subID),curr_rep_data,REML=F)
+
+full_mdl=lmer(thirdTR ~ fac_wa_control_time*reg_name*gap + fac_list + (1|subID),curr_rep_data,REML=F)
+
+summary(full_mdl)
+print(anova(full_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(full_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+
+## additional analyses, currently not reported:
+#this is the interaction with repetition - works as well, but I don't think we need it to distinguish between hemispheres. I only report the one above, without repetition
+full_mdl=lmer(thirdTR ~ fac_wa_control_time*reg_name*hemi*repetition + fac_list + (1|subID),curr_data,REML=F)
+drop1(full_mdl,test = "Chi")
+
+# only 5th repetition: This also works.
+curr_rep_data <- filter(curr_data, curr_data$repetition == 5)
+
+null_mdl=lmer(thirdTR ~ fac_wa_control_time*reg_name + fac_wa_control_time*hemi + hemi*reg_name + fac_list + (1|subID),curr_rep_data,REML=F)
+
+full_mdl=lmer(thirdTR ~ fac_wa_control_time*reg_name*hemi + fac_list + (1|subID),curr_rep_data,REML=F)
+
+summary(full_mdl)
+print(anova(full_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(full_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+ 
+```
+
+# analysis per ROI:
+# grab the data
+```{r grab the data}
+#set up:
+subtract_Rep1 <- 1
+
+analysis_reg = "hipp" 
+
+reg=13
+#lca23_025: 13
+#ldg_025: 16
+#lca1_025: 11
+#rca1_025: 21
+model= 'filtered100s_mtc_clean_mc_wmcsf_3sphere'
+
+results_dir <- sprintf("/Volumes/data/Bein/Repatime/repatime_scanner/results/encoding/rsa/no_smooth/%s/voxel_removed/FilesForR_outlier_corr_removed",model)
+
+#subtract tep1 or not
+if (subtract_Rep1 == 1) {
+allfiles <- list.files(path = paste(results_dir, "regions_data", sep="/"), pattern = sprintf("%s*",analysis_reg), all.files = FALSE, full.names = TRUE, recursive = FALSE)
+
+#set up the title
+subRep1_ttl <- 'minus Rep1'
+
+} else {
+#this is without subtracting the first rep:
+allfiles <- list.files(path = paste(results_dir, "regions_data_noRep1Subtraction", sep="/"), pattern = sprintf("%s*",analysis_reg), all.files = FALSE, full.names = TRUE, recursive = FALSE)
+
+#set up the title
+subRep1_ttl <- ''
+}
+
+#take only vector_like analysis:
+curr_all_files=allfiles[seq(4,length(allfiles), by = 4)]
+curr_file=curr_all_files[reg]
+
+fname = basename(curr_file)
+
+#get the roi:
+roi=substr(fname,6,regexpr('_simMat', fname)-1) #get the roi name
+
+#get the data
+brain_data <- read.table(curr_file, header = TRUE,sep = "\t",dec = ".")
+#the abs_norm_diff we have is first abs the difference, then subtract rep1 from other reps. That can distort the data
+#e.g., if rep one diff is -4, and rep5 diff is 1 - we want a diff that is 5, not 3. But we don't care if it's 5 or -5,
+#hence abs after the subtraction
+brain_data$abs_diff_repx_rep1 <- abs(brain_data$norm_diff)
+curr_data <- bind_cols(model_simMAT, brain_data)
+
+
+#save a copy:
+all_data <- curr_data #just to keep some copy of that, in case we mess up with things later on
+
+#plot the measurs:
+b1 <- ggplot(all_data, aes(x=all_data$ndp)) + 
+  geom_histogram() + 
+  theme_bw() +
+  labs(y = 'ndp', title ='all values')
+ 
+curr_data <- filter(all_data, all_data$wa_control_time != 0)
+ 
+
+b2 <- ggplot(curr_data, aes(x=curr_data$ndp)) + 
+  geom_histogram() + 
+  theme_bw() +
+  labs(y = 'ndp', title ='control gap values')
+
+b3 <- ggplot(all_data, aes(x=all_data$abs_diff_repx_rep1)) + 
+  geom_histogram() + 
+  theme_bw() +
+  labs(y = 'abs_diff_repx_rep1', title ='all values')
+ 
+
+b4 <- ggplot(curr_data, aes(x=curr_data$abs_diff_repx_rep1)) + 
+  geom_histogram() + 
+  theme_bw() +
+  labs(y = 'abs_diff_repx_rep1', title ='control gap values')
+
+
+grid.arrange(b1, b2,b3,b4,ncol=2)
+
+print(sprintf("roi is %s, %s",roi, model))
+
+
+```
+
+# temporal gap/event models
+```{r temporal gap/event models}
+brain_measure <- "abs_diff_repx_rep1" #"ndp" #"abs_diff_repx_rep1" 
+
+curr_data <- all_data 
+if (brain_measure == "abs_diff_repx_rep1") {
+  curr_data <- curr_data %>%
+     mutate(UNscaled_brain = curr_data$abs_diff_repx_rep1)
+  } else if (brain_measure == "ndp") {
+    curr_data <- curr_data %>%
+     mutate(UNscaled_brain = curr_data$ndp)
+  }
+
+
+#remove NA:
+curr_data <- filter(curr_data, !is.na(curr_data$UNscaled_brain))
+
+#scale brain data within subject:
+curr_data <- curr_data %>%
+   mutate(scaled_brain_bysubj = scale_by(curr_data$UNscaled_brain ~ subID))
+
+#for dg we did more gap analyses, not needed for CA3:
+analyze_gap <- 0
+
+reps=c(5)
+#########################
+curr_data$curr_gap <- curr_data$gap
+curr_data$curr_brain  <- curr_data$UNscaled_brain
+
+#if want to exclude rep1
+#curr_data <- filter(curr_data, curr_data$repetition != 1)
+
+
+###### models ######
+print(sprintf("########### analysis for %s %s %s #############",roi,subRep1_ttl,brain_measure))
+
+#wa_control_time - within is 2, across is 1
+curr_data <- filter(curr_data, curr_data$wa_control_time != 0)
+#null_model
+null_mdl=lmer(curr_brain ~ fac_list + (1|subID),curr_data,REML=F)
+
+full_mdl=lmer(curr_brain ~ fac_wa_control_time + fac_list + (1|subID),curr_data,REML=F)
+print(sprintf("event_mdl %s",roi))
+print(anova(full_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(full_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+print("")
+
+#event model control for gap: we have different number of items per gap, important to control for that:
+null_mdl=lmer(curr_brain ~ curr_gap + fac_list + (1|subID),curr_data,REML=F)
+
+full_mdl=lmer(curr_brain ~ fac_wa_control_time + curr_gap + fac_list + (1|subID),curr_data,REML=F)
+
+print(sprintf("event model, controling for gap %s", roi))
+print(anova(full_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(full_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+print("")
+
+#gap, controling for events: we have different number of items per gap, important to control for that:
+null_mdl=lmer(curr_brain ~ fac_wa_control_time + fac_list + (1|subID),curr_data,REML=F)
+
+full_mdl=lmer(curr_brain ~ fac_wa_control_time + curr_gap + fac_list + (1|subID),curr_data,REML=F)
+
+print(sprintf("gap, controling for event %s", roi))
+print(anova(full_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(full_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+print("")
+
+
+#gap and event interaction:
+null_mdl=lmer(curr_brain ~ fac_wa_control_time + curr_gap + fac_list + (1|subID),curr_data,REML=F)
+
+full_mdl=lmer(curr_brain ~ fac_wa_control_time * curr_gap + fac_list + (1|subID),curr_data,REML=F)
+
+print(sprintf("gap by event interaction %s", roi))
+print(anova(full_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(full_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+print("")
+
+#event by repetition
+#that's reported for CA3:
+null_mdl=lmer(curr_brain ~ fac_wa_control_time + repetition + curr_gap + fac_list + (1|subID),curr_data,REML=F)
+full_mdl=lmer(curr_brain ~ fac_wa_control_time*repetition + curr_gap + fac_list + (1|subID),curr_data,REML=F)
+print(sprintf("event by repetition interaction, gap in the model %s", roi))
+print(anova(full_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(full_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+print("")
+
+#gap by repetition
+#that's reported for CA1:
+null_mdl=lmer(curr_brain ~ fac_wa_control_time + repetition + curr_gap + fac_list + (1|subID),curr_data,REML=F)
+full_mdl=lmer(curr_brain ~ fac_wa_control_time + repetition * curr_gap + fac_list + (1|subID),curr_data,REML=F)
+print(sprintf("gap by repetition interaction,event in the model %s", roi))
+print(anova(full_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(full_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+print("")
+
+#event_mdl_control time by temporal gap by repetition - within is 2, across is 1
+#that's reported for DG:
+null_mdl=lmer(curr_brain ~ fac_wa_control_time*curr_gap+curr_gap*repetition + fac_wa_control_time*repetition + fac_list + (1|subID),curr_data,REML=F)
+full_mdl=lmer(curr_brain ~ fac_wa_control_time*curr_gap*repetition + fac_list + (1|subID),curr_data,REML=F)
+print(sprintf("gap by event by repetition interaction %s", roi))
+print(anova(full_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(full_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+print("")
+
+
+if (analyze_gap == 1) {
+onlyWithOrAc_data <- filter(curr_data , curr_data$wa_control_time  == 2)
+null_mdl=lmer(curr_brain ~ fac_list + (1|subID),onlyWithOrAc_data,REML=F)
+gap_mdl=lmer(curr_brain ~ curr_gap + fac_list + (1|subID),onlyWithOrAc_data,REML=F)
+print(sprintf("only WITHIN, main effect of gap, %s", roi))
+print(anova(gap_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(gap_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+print("")
+
+onlyWithOrAc_data <- filter(curr_data , curr_data$wa_control_time  == 1)
+null_mdl=lmer(curr_brain ~ fac_list + (1|subID),onlyWithOrAc_data,REML=F)
+gap_mdl=lmer(curr_brain ~ curr_gap + fac_list + (1|subID),onlyWithOrAc_data,REML=F)
+print(sprintf("only ACROSS, main effect of gap, %s", roi))
+print(anova(gap_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(gap_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+print("")
+}
+
+for ( r in reps) {
+print(sprintf("################# rep %d ####################",r))
+curr_rep_data <- filter(curr_data,curr_data$repetition == r)
+
+null_mdl=lmer(curr_brain ~ fac_list + (1|subID),curr_rep_data,REML=F)
+
+full_mdl=lmer(curr_brain ~ fac_wa_control_time + fac_list + (1|subID),curr_rep_data,REML=F)
+print(sprintf("REP %d: event_mdl %s",r, roi))
+print(anova(full_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(full_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+print("")
+
+#event model control for gap: we have different number of items per gap, important to control for that: *this is reported for CA3*
+null_mdl=lmer(curr_brain ~ curr_gap + fac_list + (1|subID),curr_rep_data,REML=F)
+
+full_mdl=lmer(curr_brain ~ fac_wa_control_time + curr_gap + fac_list + (1|subID),curr_rep_data,REML=F)
+
+print(sprintf("REP %d: event_mdl controling for gap %s",r, roi))
+print(anova(full_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(full_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+print("")
+
+#gap, controling for events: we have different number of items per gap, important to control for that:
+null_mdl=lmer(curr_brain ~ fac_wa_control_time + fac_list + (1|subID),curr_rep_data,REML=F)
+
+full_mdl=lmer(curr_brain ~ fac_wa_control_time + curr_gap + fac_list + (1|subID),curr_rep_data,REML=F)
+
+print(sprintf("REP %d: gap, controling for event %s",r, roi))
+print(anova(full_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(full_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+print("")
+
+#gap and event interaction:
+null_mdl=lmer(curr_brain ~ fac_wa_control_time + curr_gap + fac_list + (1|subID),curr_rep_data,REML=F)
+
+full_mdl=lmer(curr_brain ~ fac_wa_control_time * curr_gap + fac_list + (1|subID),curr_rep_data,REML=F)
+
+print(sprintf("REP %d: gap by event interaction %s",r, roi))
+print(anova(full_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(full_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+print("")
+
+
+if (analyze_gap == 1) {
+#only WITHIN - all gaps
+curr_rep_onlyWithOrAc_data <- filter(curr_rep_data , curr_rep_data$wa_control_time  == 2)
+
+null_mdl=lmer(curr_brain ~ fac_list + (1|subID),curr_rep_onlyWithOrAc_data,REML=F)
+gap_mdl=lmer(curr_brain ~ curr_gap + fac_list + (1|subID),curr_rep_onlyWithOrAc_data,REML=F)
+print(sprintf("only WITHIN, main effect of gap, rep %d, %s",r, roi))
+print(anova(gap_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(gap_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+print("")
+
+
+#only within - gaps 1-2
+curr_rep_selgap <- filter(curr_rep_onlyWithOrAc_data ,
+                                  curr_rep_onlyWithOrAc_data$gap  < 3)
+null_mdl=lmer(curr_brain ~ fac_list + (1|subID),curr_rep_selgap,REML=F)
+gap_mdl=lmer(curr_brain ~ curr_gap + fac_list + (1|subID),curr_rep_selgap,REML=F)
+print(sprintf("only WITHIN, gap 1-2, rep %d,  %s",r, roi))
+print(anova(gap_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(gap_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+print("")
+
+#only within - gaps 1-3
+curr_rep_selgap <- filter(curr_rep_onlyWithOrAc_data ,
+                                  curr_rep_onlyWithOrAc_data$gap  != 2)
+null_mdl=lmer(curr_brain ~ fac_list + (1|subID),curr_rep_selgap,REML=F)
+gap_mdl=lmer(curr_brain ~ curr_gap + fac_list + (1|subID),curr_rep_selgap,REML=F)
+print(sprintf("only WITHIN, gap 1-3, rep %d,  %s",r, roi))
+print(anova(gap_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(gap_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+print("")
+
+#only ACROSS - all gaps
+curr_rep_onlyWithOrAc_data <- filter(curr_rep_data , curr_rep_data$wa_control_time  == 1)
+
+null_mdl=lmer(curr_brain ~ fac_list + (1|subID),curr_rep_onlyWithOrAc_data,REML=F)
+gap_mdl=lmer(curr_brain ~ curr_gap + fac_list + (1|subID),curr_rep_onlyWithOrAc_data,REML=F)
+print(sprintf("only ACROSS, main effect of gap, rep %d, %s",r, roi))
+print(anova(gap_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(gap_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+print("")
+
+#only ACROSS - gaps 1-2
+curr_rep_selgap <- filter(curr_rep_onlyWithOrAc_data ,
+                                  curr_rep_onlyWithOrAc_data$gap  < 3)
+null_mdl=lmer(curr_brain ~ fac_list + (1|subID),curr_rep_selgap,REML=F)
+gap_mdl=lmer(curr_brain ~ curr_gap + fac_list + (1|subID),curr_rep_selgap,REML=F)
+print(sprintf("only ACROSS, gap 1-2, rep %d,  %s",r, roi))
+print(anova(gap_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(gap_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+print("")
+
+#only ACROSS - gaps 1-3
+curr_rep_selgap <- filter(curr_rep_onlyWithOrAc_data ,
+                                  curr_rep_onlyWithOrAc_data$gap  != 2)
+null_mdl=lmer(curr_brain ~ fac_list + (1|subID),curr_rep_selgap,REML=F)
+gap_mdl=lmer(curr_brain ~ curr_gap + fac_list + (1|subID),curr_rep_selgap,REML=F)
+print(sprintf("only ACROSS, gap 1-3, rep %d,  %s",r, roi))
+print(anova(gap_mdl,null_mdl))
+AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(gap_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+print("")
+
+} #end the analyse_gap
+
+} #end the repetition
+
+
+```
+
+### CA3 correlations with behavior
+##### grab the full matrix model
+```{r grab the all matrix model}
+#grabs the matrix model and encoding RTs and place encoding RTs for each pair.
+
+fc_rep <- 0 #set up for dissertation chapter: fac_rep <- 0
+t_per_list <- 24
+tot_reps <- 5
+model_simMAT <- read.table(paste(results_dir, "behavior_models", "encoding_model_for_simMat.txt", sep="/"),header = TRUE,sep = "\t",dec = ".")
+
+model_simMAT <- model_simMAT %>%
+  mutate(fac_list = factor(model_simMAT$list)) %>%
+  mutate(subID = factor(model_simMAT$subject)) %>%
+  mutate(fac_event_mdl = factor(model_simMAT$event_model)) %>%
+  mutate(fac_wa_control_time = factor(model_simMAT$wa_control_time)) %>%
+  mutate(fac_color_mdl = factor(model_simMAT$color_model)) %>%
+  mutate(fac_event_pos_item1 = factor(model_simMAT$event_pos_item1)) %>%
+  mutate(fac_event_pos_item2 = factor(model_simMAT$event_pos_item2)) %>%
+  mutate(position_code = factor(fac_event_pos_item1==fac_event_pos_item2)) %>%
+  mutate(boundary_effect = ifelse(model_simMAT$event_pos_item1 == 1, 1,0))
+  
+if (fc_rep == 1) {
+model_simMAT <- model_simMAT %>%
+  mutate(fac_rep = factor(repetition))
+} else {
+  model_simMAT <- model_simMAT %>%
+  mutate(fac_rep = scale(repetition))
+}
+
+model_simMAT <- model_simMAT %>%
+  mutate(exp_trial_num_item1 = (list-1)*tot_reps*t_per_list + (repetition-1)*t_per_list+trial_num_item1) %>%
+  mutate(exp_trial_num_item2 = (list-1)*tot_reps*t_per_list + (repetition-1)*t_per_list+trial_num_item2)
+
+#set up the event number per item1/item2:
+model_simMAT <- model_simMAT %>%
+  mutate(event_num_item1=ceiling(trial_num_item1/4),
+         event_num_item2=ceiling(trial_num_item2/4))
+
+enc_RT_to_add <- model_encRT_data %>%
+  mutate(exp_trial_num_item1 = (list-1)*tot_reps*t_per_list + (repetition-1)*t_per_list+trials) %>%
+  mutate(exp_trial_num_item2 = (list-1)*tot_reps*t_per_list + (repetition-1)*t_per_list+trials+1)
+
+
+enc_RT_to_add <- enc_RT_to_add %>%
+  select(-c(trials,repetition,list,pos_first_in_corr_pair,across_event,first_response_pleasantness,second_response_pleasantness))
+
+enc_RT_to_add1 <- enc_RT_to_add %>%
+  select(subject,exp_trial_num_item1,first_rawRT,first_RT_difFromRep1_posXrep1_minus_posXrepX,first_RT_difFromPos1Rep1_posXRep1MinRepX_min_pos1Rep1MinRepX,first_response_change)
+
+enc_RT_to_add2 <- enc_RT_to_add %>%
+  select(subject,exp_trial_num_item2,second_rawRT,second_RT_difFromRep1_posXrep1_minus_posXrepX,second_RT_difFromPos1Rep1_posXRep1MinRepX_min_pos1Rep1MinRepX,second_RT_diffpos1prev4,second_RT_diffpos1prev4_repXrep1,second_response_change)
+
+model_simMAT <- merge(model_simMAT,enc_RT_to_add2,by=c("subject","exp_trial_num_item2"))
+
+model_simMAT <- merge(model_simMAT,enc_RT_to_add1,by=c("subject","exp_trial_num_item1"))
+
+model_simMAT <- model_simMAT[with(model_simMAT, order(subject,exp_trial_num_item1,exp_trial_num_item2)), ]
+```
+##### grab the full matrix similarity data
+```{r analyse entire simMAT}
+#need to do it again so that the model and RTs would align - otherwise, we already removed Nans from curr_data, so it doesn't work...
+
+#set up:
+subtract_Rep1 <- 1 
+
+analysis_reg = "hipp" 
+
+reg=13
+
+model= 'filtered100s_mtc_clean_mc_wmcsf_3sphere'
+
+#subtract tep1 or not
+if (subtract_Rep1 == 1) {
+allfiles <- list.files(path = paste(results_dir, "regions_data", sep="/"), pattern = sprintf("%s*",analysis_reg), all.files = FALSE, full.names = TRUE, recursive = FALSE)
+
+#set up the title
+subRep1_ttl <- 'minus Rep1'
+
+} else {
+#this is without subtracting the first rep:
+allfiles <- list.files(path = paste(results_dir, "regions_data_noRep1Subtraction", sep="/"), pattern = sprintf("%s*",analysis_reg), all.files = FALSE, full.names = TRUE, recursive = FALSE)
+
+#set up the title
+subRep1_ttl <- ''
+}
+
+#take only simMAT:
+curr_all_files=allfiles[seq(3,length(allfiles), by = 3)]
+curr_file=curr_all_files[reg]
+
+fname = basename(curr_file)
+
+#get the roi:
+roi=substr(fname,6,regexpr('_simMat', fname)-1) #get the roi name
+
+#get the data
+brain_data <- read.table(curr_file, header = TRUE,sep = "\t",dec = ".")
+curr_data <- bind_cols(model_simMAT, brain_data)
+
+#remove the first repetition, if the brain data is subtracted - because all brain values will be 0.
+if (subtract_Rep1 == 1 ) {
+  curr_data <- filter(curr_data,curr_data$repetition > 1)
+}
+
+#remove NA:
+curr_data <- filter(curr_data, !is.na(curr_data$thirdTR))
+
+#scale brain data within subject:
+curr_data <- curr_data %>%
+   mutate(scaled_brain_bysubj = scale_by(curr_data$thirdTR ~ subID))
+
+#save a copy:
+all_data <- curr_data #just to keep some copy of that, in case we mess up with things later on
+
+print(sprintf("roi is %s, %s",roi,model))
+```
+##### prepare the list data
+```{r list level prepare the data}
+#this has way more than what ended up in the chapter, and has some controls as well:
+fc_rep = 0 #diss. chapter: fac_rep <- 0
+curr_data <- all_data
+
+#take only relevant items:
+curr_analysis_data_all <- curr_data %>%
+  filter(fac_wa_control_time != 0)
+
+#average - I have one RT measure, I'd want to have a difference measure in the brain - within vs. across: Note that I need to average RTs separately, bc otherwise I'm taking items twice.
+curr_analysis_data_within <- data_frame(curr_analysis_data_all %>%
+                      filter(fac_wa_control_time == 2) %>%                   
+  group_by(subID,list,repetition) %>%
+  summarize(mean_sim_within = mean(thirdTR, na.rm = TRUE)))
+
+
+curr_analysis_data_across <- data_frame(curr_analysis_data_all %>%
+                      filter(fac_wa_control_time == 1) %>%                   
+  group_by(subID,list,repetition) %>%
+  summarize(mean_sim_across = mean(thirdTR, na.rm = TRUE)))
+
+#merge it all:
+curr_analysis_data <- merge(curr_analysis_data_within,curr_analysis_data_across,by=c("subID","list","repetition")) %>%
+  mutate(mean_sim_diff = mean_sim_within - mean_sim_across)
+
+#grab the similarity 2/3/4-1 (control for "replay" at the boundary)
+temp_data <- data_frame(curr_analysis_data_all %>%
+                      filter(event_pos_item2 == 1) %>%                   
+  group_by(subID,list,repetition,event_pos_item2,event_pos_item1) %>%
+  summarize(mean_sim = mean(thirdTR, na.rm = TRUE)))
+#spread
+temp_data <- spread(temp_data,event_pos_item1,mean_sim)
+#re-name
+temp_data <- temp_data %>%
+  mutate(pos2_1 = `2`,
+         pos3_1 = `3`,
+         pos4_1 = `4`) %>%
+  select(-c(`2`,`3`,`4`,event_pos_item2)) 
+temp_data <- temp_data %>%
+  mutate(mean234_1 = rowMeans(select(temp_data, pos2_1,pos3_1,pos4_1)))
+
+curr_analysis_data <- merge(curr_analysis_data,temp_data,by=c("subID","list","repetition"))
+
+#grab the similarity 1-2/3/4 ("prediction" in pos1)
+temp_data <- data_frame(curr_analysis_data_all %>%
+                      filter(event_pos_item1 == 1) %>%                   
+  group_by(subID,list,repetition,event_pos_item1,event_pos_item2) %>%
+  summarize(mean_sim = mean(thirdTR, na.rm = TRUE)))
+#spread
+temp_data <- spread(temp_data,event_pos_item2,mean_sim)
+#re-name
+temp_data <- temp_data %>%
+  mutate(pos1_2 = `2`,
+         pos1_3 = `3`,
+         pos1_4 = `4`) %>%
+  select(-c(`2`,`3`,`4`,event_pos_item1)) 
+temp_data <- temp_data %>%
+  mutate(mean1_234 = rowMeans(select(temp_data, pos1_2,pos1_3,pos1_4)))
+
+curr_analysis_data <- merge(curr_analysis_data,temp_data,by=c("subID","list","repetition"))
+
+#grab the similarity 2-3,3-4,2-4 (all non-boundary items, control for the reactivation from these items to pos1 - to see wether it's blurryness, reactivation in general, or specific to pos1)
+temp_data <- data_frame(curr_analysis_data_all %>%
+                      filter(event_pos_item1 != 1 & wa_control_time == 2) %>%
+  group_by(subID,list,repetition) %>%
+  summarize(mean234 = mean(thirdTR, na.rm = TRUE)))
+
+curr_analysis_data <- merge(curr_analysis_data,temp_data,by=c("subID","list","repetition"))
+
+#grab the pos2_3 alone - will need it
+temp_data <- data_frame(curr_analysis_data_all %>%
+                      filter(event_pos_item1 == 2 & gap == 1) %>%
+  group_by(subID,list,repetition) %>%
+  summarize(pos2_3 = mean(thirdTR, na.rm = TRUE)))
+
+curr_analysis_data <- merge(curr_analysis_data,temp_data,by=c("subID","list","repetition"))
+
+#grab the similarity 1/2/3-4 (reactivation at pos4)
+temp_data <- data_frame(curr_analysis_data_all %>%
+                      filter(event_pos_item2 == 4) %>%                   
+  group_by(subID,list,repetition,event_pos_item2,event_pos_item1) %>%
+  summarize(mean_sim = mean(thirdTR, na.rm = TRUE)))
+#spread
+temp_data <- spread(temp_data,event_pos_item1,mean_sim)
+#re-name
+temp_data <- temp_data %>%
+  mutate(pos1_4 = `1`,
+         pos2_4 = `2`, 
+         pos3_4 = `3`) %>%
+  select(-c(`2`,`3`,`1`,event_pos_item2)) 
+temp_data <- temp_data %>%
+  mutate(mean123_4 = rowMeans(select(temp_data, pos1_4,pos2_4,pos3_4))) %>%
+  select(-pos1_4) #we have it from the previous one - so avoid 2 of them
+
+curr_analysis_data <- merge(curr_analysis_data,temp_data,by=c("subID","list","repetition"))
+
+#grab the similarity 2-4,3-4, (related to similarity 123-4, but take out pos1 becuase it's the boundary)
+temp_data <- data_frame(curr_analysis_data_all %>%
+                      filter(event_pos_item1 != 1 & event_pos_item2 == 4 & wa_control_time == 2) %>%
+  group_by(subID,list,repetition) %>%
+  summarize(mean23_4 = mean(thirdTR, na.rm = TRUE)))
+
+curr_analysis_data <- merge(curr_analysis_data,temp_data,by=c("subID","list","repetition"))
+
+#average sim, within, per gap (for dg analyses):
+temp_data <- data_frame(curr_analysis_data_all %>%
+                      filter(wa_control_time == 2) %>%
+  group_by(subID,list,repetition,gap) %>%
+  summarize(mean_sim = mean(thirdTR, na.rm = TRUE)))
+
+temp_data <- temp_data %>% pivot_wider(names_from = gap, values_from = c("mean_sim"))
+temp_data <- temp_data %>%
+  mutate(within_gap1 = `1`,
+         within_gap2 = `2`, 
+         within_gap3 = `3`,
+         within_g3min_g1 = `3` - `1`,
+         within_g2min_g1 = `2` - `1`) %>%
+  select(-c(`2`,`3`,`1`)) 
+
+curr_analysis_data <- merge(curr_analysis_data,temp_data,by=c("subID","list","repetition")) %>%
+  mutate(g1_AcMinWithin = pos4_1-within_gap1,
+         pos41Minpos12 = pos4_1-pos1_2)
+
+
+#now deal with encoding RTs:
+#measures we have from MATLAB:
+model_encRT_data$subID <- factor(model_encRT_data$subject)
+listRTs <- data_frame(model_encRT_data %>%
+  filter (model_encRT_data$repetition != 1 ) %>%
+  group_by(subID,list,repetition) %>%
+  summarize(learn_all = mean(second_RT_difFromRep1_posXrep1_minus_posXrepX, na.rm = TRUE),
+    event_learn = mean(second_RT_difFromPos1Rep1_posXRep1MinRepX_min_pos1Rep1MinRepX, na.rm = TRUE),
+  boundary4to1 = mean(second_RT_diffpos1prev4, na.rm = TRUE),
+  learning_boundary4to1 = mean(second_RT_diffpos1prev4_repXrep1, na.rm = TRUE)))
+
+#calculate each pos, in each rep:
+pos_RT <- model_encRT_data %>%
+  filter(model_encRT_data$repetition != 1 )
+#I'm going to take the second_rawRT - so change the numbers in pos_first_in_corr_pair
+pos_RT <- pos_RT %>%
+  mutate(pos_first_in_corr_pair = pos_first_in_corr_pair + 1,
+         trials = trials + 1)
+pos_RT <- pos_RT %>%
+  mutate(pos_first_in_corr_pair = if_else(pos_first_in_corr_pair == 5,1,pos_first_in_corr_pair))
+
+all_pos_RT <- data_frame(pos_RT %>%
+               group_by(subID,list,repetition,pos_first_in_corr_pair) %>%
+  summarize(rawRT = mean(second_rawRT, na.rm = TRUE),
+  learn = mean(second_RT_difFromRep1_posXrep1_minus_posXrepX, na.rm = TRUE))) 
+
+all_pos_RT <- all_pos_RT %>% pivot_wider(names_from = pos_first_in_corr_pair, values_from = c("rawRT","learn"), names_sep="")
+#now correct the pos:
+
+#average pos 2-4 (all within)
+# z$mean=rowMeans(z[,c("x", "y")], na.rm=TRUE)
+# data %>% mutate(c = rowMeans(select(data, a,b)))
+all_pos_RT <- all_pos_RT %>%
+  mutate(rawRT2_4  = rowMeans(select(all_pos_RT, rawRT2,rawRT3,rawRT4)),
+         learn2_4 = rowMeans(select(all_pos_RT, learn2,learn3,learn4)),
+         rawRT2_3  = rowMeans(select(all_pos_RT, rawRT2,rawRT3)),
+         learn2_3 = rowMeans(select(all_pos_RT, learn2,learn3)))
+
+all_pos_RT <- all_pos_RT %>%
+  mutate(boundary1Min234 = rawRT1-rawRT2_4,
+         learn_boundary234Min1 = learn2_4-learn1,
+         boundary1Div234 = rawRT1/rawRT2_4,
+         learn_boundary234Div1 = learn2_4/learn1)
+
+
+#merge it with brain data:
+curr_analysis_data <- merge(curr_analysis_data,listRTs,by=c("subID","list","repetition")) 
+
+curr_analysis_data <- merge(curr_analysis_data,all_pos_RT,by=c("subID","list","repetition")) 
+
+if (fc_rep == 1) {
+ curr_analysis_data$fac_rep <- factor(curr_analysis_data$repetition)
+} else {
+   curr_analysis_data$fac_rep <- curr_analysis_data$repetition
+}
+
+#factor list:
+curr_analysis_data$fac_list <- factor(curr_analysis_data$list)
+
+
+##### TEST RTs:
+# first, analyse the RTs, only HC:
+behav_data <- model_TempTestRT_data
+#take only hc
+behav_data <- filter(behav_data, behav_data$hc == 1)
+test_RT <- data_frame(behav_data %>%
+               group_by(subject,list,pos_first_in_corr_pair) %>%
+  summarize(temporalTestRT = mean(temporalTestRT, na.rm = TRUE))) 
+
+test_RT <- test_RT %>% pivot_wider(names_from = pos_first_in_corr_pair, values_from = c("temporalTestRT"), names_sep="")
+
+test_RT <- test_RT %>%
+  mutate(testRT_pos1 = `1`,
+         testRT_pos2 = `2`, 
+         testRT_pos4 = `4`) %>%
+  select(-c(`2`,`4`,`1`)) 
+test_RT <- test_RT %>%
+  mutate(testRT_mean12_within = rowMeans(select(test_RT, testRT_pos1,testRT_pos2)),
+         testRT_across_within = testRT_pos4-testRT_mean12_within,
+         testRT_pos2_pos1 = testRT_pos2 - testRT_pos1,
+         testRT_pos4_pos1 = testRT_pos4 - testRT_pos1,
+         testRT_pos4_pos2 = testRT_pos4 - testRT_pos2,
+         subID = factor(subject)) %>%
+  select(-subject)
+
+#organize the brain data: currently, all the data has the difference from rep1. 
+#I'll take rep5, which is in essence, rep5-rep1 diff in similarity.
+test_brain_data <- filter(curr_analysis_data, curr_analysis_data$repetition == 5)
+test_brain_data <- merge(test_brain_data,test_RT, by = c("subID","list"))
+
+#set up names:
+all_behav_varname <- c('learn_all','event_learn','boundary4to1','learning_boundary4to1', 'rawRT1','rawRT2_4','rawRT2_3','learn1','learn_2_4','learn_2_3','boundary1Min234','learn_boundary234Min1','boundary1Div234','learn_boundary234Div1','rawRT2','rawRT3','rawRT4','learn2','learn3','learn4')
+
+#save it all:
+list_data <- curr_analysis_data
+# great, we're ready to test some models!
+
+```
+##### run models - similarity with encoding RT
+```{r run list level models}
+# in diss. chapter - only reported Rep5. I left here some parts just to have an easy access.
+only_rep5 <- 1 #if only want to analyse rep5
+#set up for graphs:
+all_spectral<-brewer.pal(11,"RdYlBu")
+myspec_within <-all_spectral[c(2,3,4)]
+#myspec_across <-all_spectral[c(10,9,8)] #blues
+all_spectral<-brewer.pal(9,"Greys")
+myspec_across <-all_spectral[c(4,5,6)] #greys
+myspec <-c(myspec_within[2]) #,myspec_across[2]
+
+curr_analysis_data <- list_data
+reps=c(5)
+
+labels_rep <- c(
+  "1" = "Rep1",
+  "2" = "Rep2",
+  "3" = "Rep3",
+  "4" = "Rep4",
+  "5" = "Rep5"
+)
+
+behav_varname <- c('rawRT1', 'rawRT2_4',
+                   'boundary1Min234')
+
+contrasts_diff <- c('mean_sim_diff','mean_sim_within','mean_sim_across')
+
+curr_con <- contrasts_diff #contrasts_pos1_across #contrasts_pos1pred_pos4_react
+
+for (bb in behav_varname[c(3)]) {
+  for (cc in curr_con[c(1)]) {
+    
+    #RAW RT (diss. chapter was run with Raw RTs, scaling doesn't matter):
+    curr_analysis_data <- curr_analysis_data %>%
+       mutate(scaled_RT = curr_analysis_data[[bb]]) %>%
+       mutate(scaled_brain_bysubj = scale_by(curr_analysis_data[[cc]] ~ subID))
+
+    # curr_analysis_data <- curr_analysis_data %>%
+    #   mutate(scaled_RT = scale(curr_analysis_data[[bb]], center = FALSE)) %>%
+    #   mutate(scaled_brain_bysubj = scale_by(curr_analysis_data[[cc]] ~ subID))
+
+    
+    print(sprintf("########### roi: %s, brain: %s, behavior: %s ############",roi,cc,bb))
+      
+    if (only_rep5 == 0) {  
+    #null mdl
+    null_mdl=lmer(scaled_RT ~ fac_list + fac_rep + (1|subID),data = curr_analysis_data, REML = FALSE)
+    
+    #### scaled brain main effect model:
+    print(sprintf("%s, scaled BRAIN %s, behavior: %s, %s",roi,cc,bb, subRep1_ttl))
+    brain_mdl=lmer(scaled_RT ~ scaled_brain_bysubj + fac_list + fac_rep + (1|subID),data = curr_analysis_data, REML = FALSE)
+    
+    print(anova(null_mdl,brain_mdl))
+    print("")
+
+    curr_p <- ggplot(curr_analysis_data, aes(x=scaled_brain_bysubj, y=scaled_RT)) +
+           geom_point(shape=19, colour = "grey", size = 1, alpha = .6) +
+           geom_smooth(method=lm,color = myspec[1],fill = myspec[1]) + 
+           labs(x = sprintf("%s (RepX-Rep1)",cc), y = bb, title = roi) +
+           theme_bw() + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+           
+      print(curr_p)
+      
+    ### brain by rep model:
+    print(sprintf("%s, scaled BRAIN BY REPETITION, %s, behavior: %s, %s",roi,cc,bb, subRep1_ttl))
+   
+    brain_by_rep_mdl=lmer(scaled_RT ~ scaled_brain_bysubj * fac_rep + fac_list +  (1|subID),data = curr_analysis_data, REML = FALSE)
+    
+    print(anova(brain_mdl,brain_by_rep_mdl))
+    print("")
+    
+    curr_p_rep <- ggplot(curr_analysis_data, aes(x=scaled_brain_bysubj, y=scaled_RT)) +
+           geom_point(shape=19, colour = "grey", size = 1, alpha = .6) +
+           geom_smooth(method=lm,color = myspec[1],fill = myspec[1]) + 
+           labs(x = sprintf("%s (RepX-Rep1)",cc), y = bb, title = roi) +
+            facet_grid(.~fac_rep,labeller = labeller(fac_rep = labels_rep)) +
+      
+           theme_bw() + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+           
+    print(curr_p_rep)
+    print('###### ANALYSIS REP2 vs. REP5 #######')
+    curr_rep_data <- filter(curr_analysis_data,curr_analysis_data$repetition == 2 | curr_analysis_data$repetition == 5)
+    
+    print(sprintf("%s, scaled BRAIN BY REP2/REP5, %s, behavior: %s, %s",roi,cc,bb, subRep1_ttl))
+    brain_and_rep_mdl = lmer(scaled_RT ~ scaled_brain_bysubj + fac_rep + fac_list +  (1|subID),data = curr_rep_data, REML = FALSE)
+    
+    brain_by_rep_mdl=lmer(scaled_RT ~ scaled_brain_bysubj * fac_rep + fac_list +  (1|subID),data = curr_rep_data, REML = FALSE)
+    
+    print(anova(brain_and_rep_mdl,brain_by_rep_mdl))
+    print("")
+    
+    curr_p_rep25 <- ggplot(curr_rep_data, aes(x=scaled_brain_bysubj, y=scaled_RT)) +
+           geom_point(shape=19, colour = "grey", size = 1, alpha = .6) +
+           geom_smooth(method=lm,color = myspec[1],fill = myspec[1]) + 
+           labs(x = sprintf("%s (RepX-Rep1)",cc), y = bb, title = roi) +
+            facet_grid(.~fac_rep,labeller = labeller(fac_rep = labels_rep)) +
+           theme_bw() + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+           
+    print(curr_p_rep25)
+    
+    } #ends the if only rep5
+    
+    print('###### ANALYSIS PER REPETITION #######')
+    for ( r in reps) {
+    
+    curr_rep_data <- filter(curr_analysis_data,curr_analysis_data$repetition == r)
+    
+    #null mdl
+    null_mdl=lmer(scaled_RT ~ fac_list +  (1|subID),data = curr_rep_data, REML = FALSE)
+    
+    #### scaled brain main effect model:
+    print(sprintf("REP %d: %s, scaled BRAIN %s, behavior: %s, %s",r,roi,cc,bb, subRep1_ttl))
+    brain_mdl=lmer(scaled_RT ~ scaled_brain_bysubj + fac_list +  (1|subID),data = curr_rep_data, REML = FALSE)
+    print(anova(null_mdl,brain_mdl))
+    print("")
+    AIC_diff <- (extractAIC(null_mdl)[2] - extractAIC(brain_mdl)[2])
+print(sprintf("AIC diff: %.2f",AIC_diff))
+print("")
+
+curr_p <- ggplot(curr_rep_data, aes(x=scaled_brain_bysubj, y=scaled_RT)) +
+           geom_point(shape=19, colour = "grey", size = 1, alpha = .6) +
+           geom_smooth(method=lm,color = myspec[1],fill = myspec[1]) + 
+           labs(x = sprintf("%s (RepX minus Rep1)",cc), y = bb, title = roi) +
+           theme_bw() + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+           
+      print(curr_p)
+
+      
+    }
+    
+  }
+
+} #end the run_brain if
+
+```
+
+### CA3 control for color:
+```{r CA3 control for color}
+## this doesn't work amazingly - event is not sig. when having color in the model, currnetly not reported
+curr_data <- all_data
+flt_gap_ttl <- "all gaps"
+reps <- 5
+#curr_data <- filter(all_data,all_data$gap <= 19)
+#flt_gap_ttl <- "gaps < 19"
+
+null_mdl=lmer(thirdTR ~ fac_list + (1|subID),curr_data,REML=F)
+color_mdl=lmer(thirdTR ~ color_model + fac_list + (1|subID),curr_data,REML=F)
+print(sprintf("color model, roi: %s, %s",roi,flt_gap_ttl))
+print(anova(null_mdl,color_mdl))
+print("")
+
+#color model control gap:
+gap_mdl=lmer(thirdTR ~ gap + fac_list + (1|subID),curr_data,REML=F)
+color_and_gap_mdl=lmer(thirdTR ~ color_model + gap + fac_list + (1|subID),curr_data,REML=F)
+print(sprintf("color model, controlling for gap roi: %s, %s",roi,flt_gap_ttl))
+print(anova(color_and_gap_mdl,gap_mdl))
+print("")
+
+
+#Is there an additional effect of event, controling for color - I cannot do that with the event controling for time, bc there is no color that is not also within-event, so that's using the event model
+event_and_color_mdl = lmer(thirdTR ~ fac_event_mdl + color_model + fac_list + (1|subID),curr_data,REML=F)
+print(sprintf("event and color model over color,roi: %s, %s",roi,flt_gap_ttl))
+print(anova(event_and_color_mdl,color_mdl))
+print("")
+
+event_and_color_and_gap_mdl = lmer(thirdTR ~ fac_event_mdl + color_model + gap + fac_list + (1|subID),curr_data,REML=F)
+print(sprintf("event and color model over color (control gap),roi: %s, %s",roi,flt_gap_ttl))
+print(anova(event_and_color_and_gap_mdl,color_and_gap_mdl))
+print("")
+
+for ( r in reps) {
+curr_rep_data <- filter(curr_data,curr_data$repetition == r)
+
+color_and_gap_mdl=lmer(thirdTR ~ color_model + gap + fac_list + (1|subID),curr_rep_data,REML=F)
+
+event_and_color_and_gap_mdl = lmer(thirdTR ~ fac_event_mdl + color_model + gap + fac_list + (1|subID),curr_rep_data,REML=F)
+print(sprintf("REP %d: event and color model over color (control gap),roi: %s, %s",r, roi,flt_gap_ttl))
+print(anova(event_and_color_and_gap_mdl,color_and_gap_mdl))
+print("")
+
+gap_mdl = lmer(thirdTR ~ gap + fac_list + (1|subID),curr_rep_data,REML=F)
+event_gap_mdl = lmer(thirdTR ~ fac_event_mdl + gap + fac_list + (1|subID),curr_rep_data,REML=F)
+print(anova(event_gap_mdl,gap_mdl))
+print("")
+
+color_event_gap_mdl = lmer(thirdTR ~ color_model + fac_event_mdl + gap + fac_list + (1|subID),curr_rep_data,REML=F)
+print(sprintf("REP %d: color model, controling for both event and gap in the model, roi: %s, %s",r,roi,flt_gap_ttl))
+print(anova(event_gap_mdl,color_event_gap_mdl))
+print("")
+
+}
+```
+
+
+## plot similarity events/gap
+```{r plot gap from entire simMAT}
+brain_measure <- "ndp" #"ndp" #"abs_diff_repx_rep1" #ndp
+#abs_norm_diff (use only if not subtracting rep1, otherwise, use abs_diff_repx_rep1)
+curr_data <- all_data 
+if (brain_measure == "abs_diff_repx_rep1") {
+  curr_data <- curr_data %>%
+     mutate(UNscaled_brain = curr_data$abs_diff_repx_rep1)
+  } else if (brain_measure == "ndp") {
+    curr_data <- curr_data %>%
+     mutate(UNscaled_brain = curr_data$ndp)
+  }else if (brain_measure == "abs_norm_diff") {
+  curr_data <- curr_data %>%
+     mutate(UNscaled_brain = curr_data$abs_norm_diff)
+  }
+
+#remove NA:
+curr_data <- filter(curr_data, !is.na(curr_data$UNscaled_brain))
+curr_data$curr_brain <- curr_data$UNscaled_brain
+
+#plot only control time:
+data_wa_control_time <- filter(curr_data, curr_data$wa_control_time != 0)
+
+if (subtract_Rep1 == 1) {
+   #remove Rep1, don't want to plot it.
+ data_wa_control_time <- filter(data_wa_control_time, data_wa_control_time$repetition != 1)
+ }
+
+
+summary_gap_event_model_control_time_rep <- data_wa_control_time %>%
+  group_by(subID, gap, fac_wa_control_time, repetition ) %>%
+  summarize(mean_sim = mean(curr_brain, na.rm = TRUE))
+summary_gap_event_model_control_time_rep$fac_gap <- factor(summary_gap_event_model_control_time_rep$gap)
+
+sum_data <- summary_gap_event_model_control_time_rep %>%
+  group_by(gap, fac_wa_control_time, repetition ) %>%
+  summarize(mean_sim = mean(mean_sim, na.rm = TRUE))
+
+#onlly rep5:
+data_wa_control_time_rep5 <- filter(data_wa_control_time, data_wa_control_time$repetition == 5)
+
+summary_gap_event_model_control_time_rep5 <- data_wa_control_time_rep5 %>%
+  group_by(subID, gap, fac_wa_control_time ) %>%
+  summarize(mean_sim = mean(curr_brain, na.rm = TRUE))
+
+
+########### actually plot things ###########
+all_spectral<-brewer.pal(11,"RdYlBu")
+myspec_within <-all_spectral[c(2,3,4)]
+#myspec_across <-all_spectral[c(10,9,8)] #blues
+all_spectral<-brewer.pal(9,"Greys")
+myspec_across <-all_spectral[c(4,5,6)] #greys
+myspec <-c(myspec_across[2],myspec_within[2])
+
+#plot event by gap by rep - don't plot rep1
+labels_rep <- c(
+  "1" = "Repetition 1",
+  "2" = "Repetition 2",
+  "3" = "Repetition 3",
+  "4" = "Repetition 4",
+  "5" = "Repetition 5"
+)
+
+labels_gap <- c(
+  "1" = "Gap1",
+  "2" = "Gap2",
+  "3" = "Gap3"
+)
+
+labels_wa <- c(
+  "1" = "across",
+  "2" = "within"
+)
+
+
+if (brain_measure == "abs_norm_diff" & subtract_Rep1 == 0 ) {
+  #reverse y axis
+all_reps_p <- ggplot(summary_gap_event_model_control_time_rep, aes(x = gap, y = mean_sim)) +
+  stat_summary(data = summary_gap_event_model_control_time_rep, fun.data = mean_se_, geom = "pointrange",aes(color = fac_wa_control_time), position_dodge(width = .9),size=1) +
+  labs(x = 'Temporal Distance', y = sprintf('%s %s', brain_measure,subRep1_ttl)) +
+  scale_color_manual(values = myspec) +
+  scale_y_reverse() +
+  facet_grid(~repetition, labeller = labeller(repetition = labels_rep)) + 
+  theme_all_gaps + theme(legend.position = "none") 
+} else if (brain_measure == "abs_diff_repx_rep1" & subtract_Rep1 == 1 ) {
+  #reverse y axis
+  all_reps_p <- ggplot(summary_gap_event_model_control_time_rep, aes(x = gap, y = mean_sim)) +
+  stat_summary(data = summary_gap_event_model_control_time_rep, fun.data = mean_se_, geom = "pointrange",aes(color = fac_wa_control_time), position_dodge(width = .9),size=1) +
+  labs(x = 'Temporal Distance', y = sprintf('%s %s', brain_measure,subRep1_ttl)) +
+  scale_y_reverse() +
+  scale_color_manual(values = myspec) +
+  facet_grid(~repetition, labeller = labeller(repetition = labels_rep)) + 
+  theme_all_gaps + theme(legend.position = "none") 
+} else {
+  all_reps_p <- ggplot(summary_gap_event_model_control_time_rep, aes(x = gap, y = mean_sim)) +
+  stat_summary(data = summary_gap_event_model_control_time_rep, fun.data = mean_se_, geom = "pointrange",aes(color = fac_wa_control_time), position_dodge(width = .9),size=1) +
+  labs(x = 'Temporal Distance', y = sprintf('%s %s', brain_measure,subRep1_ttl)) +
+  scale_color_manual(values = myspec) +
+  facet_grid(~repetition, labeller = labeller(repetition = labels_rep)) + 
+  theme_all_gaps + theme(legend.position = "none") 
+}
+print(all_reps_p)
+
+#coord_cartesian(ylim = c(-.018,.023)) +
+#this fig is for the main figures:
+rep5 <- ggplot(summary_gap_event_model_control_time_rep5, aes(x = gap, y = mean_sim)) +
+  stat_summary(data = summary_gap_event_model_control_time_rep5, fun.data = mean_se_, geom = "pointrange",aes(color = fac_wa_control_time), position_dodge(width = .9),size=1) +
+  labs(x = 'Gap', y = sprintf('%s, %s', brain_measure,subRep1_ttl)) +
+  scale_color_manual(values = myspec) +
+  scale_x_continuous(breaks = c(1,2,3),labels=c(0,1,2)) +
+  theme_gap + theme(legend.position = "none") 
+
+print(rep5)
+
+rep5_with_subj_dots <- ggplot(summary_gap_event_model_control_time_rep5, aes(x = gap, y = mean_sim)) +
+  stat_summary(data = summary_gap_event_model_control_time_rep5, fun.data = mean_se_, geom = "pointrange",aes(color = fac_wa_control_time), position_dodge(width = .9),size=1) +
+  geom_point(aes(color = fac_wa_control_time), position = position_jitterdodge(dodge.width = 0.9), alpha = .8,size=2) +
+  labs(x = 'Temporal Distance', y = sprintf('%s, %s', brain_measure,subRep1_ttl)) +
+  scale_color_manual(values = myspec) +
+  theme_gap + theme(legend.position = "none") 
+
+
+
+#geom_hline(yintercept=0, color="black", linetype = "dotted") +
+all_reps_p_by_wa <- ggplot(summary_gap_event_model_control_time_rep, aes(x = repetition, y = mean_sim,color = fac_wa_control_time, alpha = fac_gap)) + 
+  stat_summary(data = summary_gap_event_model_control_time_rep, fun.data = mean_se_, geom = "pointrange",aes(color = fac_wa_control_time,alpha = fac_gap), position_dodge(width = .9),size=1) +
+  labs(x = 'Repetition', y = sprintf('%s, %s', brain_measure,subRep1_ttl), title = roi) +
+  scale_alpha_discrete(range = c(1,0.4),
+                       name=NULL,
+                       breaks=c("1", "2","3"),
+                       labels=c("Gap1","Gap2","Gap3")) +
+  scale_color_manual(values = myspec,
+                       name=NULL,
+                       breaks=c("1", "2"),
+                       labels=c("across-events","within-event")) +
+  facet_grid(~fac_wa_control_time,labeller = labeller(fac_wa_control_time = labels_wa)) + 
+  theme_all_gaps + theme(legend.position = NULL)
+print(all_reps_p_by_wa)
+
+#just plot gap:
+# all_reps_gap <- ggplot(summary_gap_event_model_control_time_rep, aes(x = gap, y = mean_sim)) +
+#   stat_summary(data = summary_gap_event_model_control_time_rep, fun.data = mean_se_, geom = "pointrange",aes(color = fac_wa_control_time), position_dodge(width = .9),size=1) +
+#   labs(x = 'Gap', y = 'Similarity (Diff. from Rep1)') +
+#   scale_color_manual(values = myspec) +
+#   scale_x_continuous(breaks = c(1,2,3),labels=c(0,1,2)) +
+#   facet_grid(~repetition,labeller = labeller(repetition = labels_rep)) + 
+#   theme_all_gaps + theme(legend.position = "none") 
+# 
+# print(all_reps_p)
+```
+
+## plot the left CA23/DG interaction in rep5
+```{r plot the left CA23/DG interaction in rep5}
+
+all_spectral<-brewer.pal(11,"RdYlBu")
+myspec_within <-all_spectral[c(2,3,4)]
+#myspec_across <-all_spectral[c(10,9,8)] #blues
+all_spectral<-brewer.pal(9,"Greys")
+myspec_across <-all_spectral[c(4,5,6)] #greys
+myspec <-c(myspec_across[2],myspec_within[2])
+
+### grab the data
+#lca23_025: 13
+#ldg_025: 16
+
+regs=c(13,16)
+for (reg in regs ) {
+curr_file=curr_all_files[reg]
+fname = basename(curr_file)
+#get the roi:
+roi <- substr(fname,10,regexpr('_025', fname)-1) #get the roi name
+hemi <- substr(fname,9,9)
+print(sprintf("roi is %s, hemi is %s ",roi, hemi))
+
+#get the data
+brain_data <- read.table(curr_file, header = TRUE,sep = "\t",dec = ".")
+curr_data <- bind_cols(model_simMAT, brain_data)
+
+#remove NA:
+curr_data <- filter(curr_data, !is.na(curr_data$thirdTR))
+
+curr_data$reg_name <- roi
+curr_data$hemi <- hemi
+if (reg == 13) {
+  all_reg_data <- curr_data
+} else {
+  all_reg_data <- bind_rows(all_reg_data, curr_data)
+}
+
+} #ends the loop for rois
+
+curr_data <- all_reg_data
+#event_mdl_control time - within is 2, across is 1
+curr_data <- filter(curr_data, curr_data$wa_control_time != 0)
+curr_data <- filter(curr_data, curr_data$repetition == 5)
+
+summary_gap_event_model_control_time_rep <- curr_data %>%
+  group_by(subID, gap, fac_wa_control_time, reg_name ) %>%
+  summarize(mean_sim = mean(thirdTR, na.rm = TRUE))
+
+rep5_int <- ggplot(summary_gap_event_model_control_time_rep, aes(x = gap, y = mean_sim)) +
+  stat_summary(data = summary_gap_event_model_control_time_rep, fun.data = mean_se_, geom = "pointrange",aes(color = fac_wa_control_time), position_dodge(width = .9),size=1) +
+  labs(x = 'Gap', y = 'Similarity (Rep5-Rep1)') +
+  scale_color_manual(values = myspec) +
+  scale_x_continuous(breaks = c(1,2,3),labels=c(0,1,2)) +
+  facet_grid(~reg_name, scales = "free_x") + 
+  theme_all_gaps + theme(legend.position = "none",
+  strip.background = element_blank(),
+  strip.text.x = element_blank(),
+  panel.spacing.x =unit(0.6, "cm"),
+  panel.border = element_blank()) #all_spectral[2]) #panel.background = element_rect(fill = all_spectral[2])
+
+print(rep5_int)
+
+#geom_hline(yintercept=0, colour="black", linetype = "dotted") +
+#coord_cartesian(ylim=c(-.02,.025)) +
+```
