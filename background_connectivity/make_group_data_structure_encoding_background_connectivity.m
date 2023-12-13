@@ -1,0 +1,137 @@
+function ResultsBackgroundConnectivityOnlyNum=make_group_data_structure_encoding_background_connectivity(engram)
+
+if engram
+    mydir='/data/Bein';
+else
+    mydir='/Volumes/data/Bein';
+end
+
+proj_dir=fullfile(mydir,'/Repatime/repatime_scanner');
+addpath(genpath(fullfile(mydir,'Software/CBI_tools')));
+
+%set parameters for analysis:
+min_clust_size=10;
+
+%THIS HAS ALL OF THEM:
+subjects={'2ZD','3RS','5BS','6GC','7MS','8PL','9IL',...
+    '10BL','11CB','12AN','13GT','14MR','16DB','17VW','18RA','19AB',...
+    '20SA','21MY','22JP','24DL','25AL','26MM','28HM',...
+    '30RK','31JC','32CC','33ML','34RB','36AN','37IR'};
+
+%subjects={'2ZD','3RS','5BS','6GC','7MS','8PL','9IL','10BL','11CB','12AN','13GT','14MR','16DB','17VW','18RA','19AB','20SA','21MY','22JP','24DL','25AL','26MM','28HM','30RK','31JC'};
+%subjects={'2ZD','3RS'};
+
+%analysis specific stuff:
+task='encoding';
+smoothing='no_smooth';
+modeling='Univar_EachPositionModel_with_wmcsf_3sphere_noSliceTimingCorrection';
+results_dir=fullfile(proj_dir,'results',task,'background_connectivity',smoothing,modeling);
+
+if ~exist(results_dir)
+    mkdir(results_dir)
+end
+results_filename=fullfile(results_dir,'background_hipp.mat');
+reg_mat_dir=fullfile(results_dir,'regions_matfiles');
+
+   
+reg_names={...
+    'fs_ca23_025',...%25
+    'fs_rca23_025',...%26
+    'fs_lca23_025',...%27
+    'fs_dg_025',...%28
+    'fs_rdg_025',...%29
+    'fs_ldg_025',...%30
+    };
+
+num_trials=24;
+num_lists=6;
+num_reps=5;
+%num_events=6;
+
+%too_quick_thresh=100;
+Exclude_SD=3;
+
+%% prepare the structures and headers:
+
+ResultsBackgroundConnectivityOnlyNum={};
+reg_num_voxels={};
+%prepare the header:
+%region names were too long to put together in matlab, so I just called it
+%reg1,2,3,... I save the reg_names, so I can later match regions to numbers
+for reg1=1:numel(reg_names)
+    for reg2=reg1+1:numel(reg_names)
+        ResultsBackgroundConnectivityOnlyNum.perList.(['reg' num2str(reg1) '_' 'reg' num2str(reg2)])=nan(numel(subjects),num_lists,num_reps);
+    end
+end
+
+%% actually analyze the data:
+for subj=1:numel(subjects)
+    fprintf('analyzing subj %s\n',subjects{subj});
+    %load the data:
+    load(fullfile(reg_mat_dir,['anatomical_and_event_model_linear_decrease_rois_' subjects{subj} '.mat']),'reg_data');
+    reg_data_all=reg_data;
+    clear reg_data
+    %average on voxels, exclude outliers:
+    for reg=1:numel(reg_names)
+        %keep the number of voxels, important for later:
+        reg_num_voxels.(reg_names{reg})(subj)=size(reg_data_all.(reg_names{reg}),1);
+        % I don't remove outliers, data is anyway smoothed, I checked and
+        % it looks like the outliers it does remove are just above
+        % threshold, and just the pick of a wave, so I don't remove
+        
+%         %pull the data across all repetitions and remove outliers:
+%         curr_data_temp=reg_data.(reg_names{reg});
+%         curr_data_temp=reshape(curr_data_temp,[size(curr_data_temp,1)*size(curr_data_temp,2)*size(curr_data_temp,3)*size(curr_data_temp,4),1]);
+%         t_std=nanstd(curr_data_temp);
+%         t_av=nanmean(curr_data_temp);
+%         curr_data=reg_data.(reg_names{reg});
+%         curr_data(curr_data > t_av+(Exclude_SD*t_std))=nan;
+%         curr_data(curr_data < t_av-(Exclude_SD*t_std))=nan;
+%         %check the data for no nans:
+%         if ~isempty(find(isnan(curr_data)))
+%             fprintf('reg %d data has outliers \n',reg)
+%         end
+        curr_data=reg_data_all.(reg_names{reg});
+        reg_data.(reg_names{reg})=squeeze(nanmean(curr_data,1)); %calculate the mean residual per list per rep
+        %rearange to put all the lists one after the other - better for
+        %later:
+        %reg_data.(reg_names{reg})=reshape(data_temp,[size(data_temp,1)*size(data_temp,2),size(data_temp,3)]);
+    end
+    
+    
+    %now get the data for each region and calculate the correlations between regions:
+    %calculate
+    for reg1=1:numel(reg_names)-1
+        if reg_num_voxels.(reg_names{reg1})(subj) < min_clust_size
+            fprintf(sprintf('less than %d voxels region %s \n',min_clust_size,reg_names{reg1}))
+        else
+            
+            for reg2=reg1+1:numel(reg_names)
+                if reg_num_voxels.(reg_names{reg2})(subj) < min_clust_size
+                    fprintf(sprintf('less than %d voxels region %s \n',min_clust_size,reg_names{reg2}))
+                else
+                    %analyse the data:
+                    data1=reg_data.(reg_names{reg1});
+                    data2=reg_data.(reg_names{reg2});
+                    
+                    %%compute connectivity in each position:
+                    for l=1:num_lists
+                        for r=1:num_reps
+                            % gather the items:
+                            timeseriesReg1=data1(:,l,r);
+                            timeseriesReg2=data2(:,l,r);
+                            corr=corrcoef(timeseriesReg1,timeseriesReg2,'row','complete'); %ignore nans if they are there
+                            ResultsBackgroundConnectivityOnlyNum.perList.(['reg' num2str(reg1) '_' 'reg' num2str(reg2)])(subj,l,r)=corr(2,1);
+                        end %rep loop
+                    end %pos loop
+                    
+                end %ends the reg2 cluster size conditional
+            end %ends the reg2 loop
+        end %ends the reg1 cluster size conditional
+    end %ends the reg1 loop
+    
+end %ends the subjects loop
+
+save(results_filename,'ResultsBackgroundConnectivityOnlyNum','reg_num_voxels','reg_names');
+end
+
