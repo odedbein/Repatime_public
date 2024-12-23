@@ -154,5 +154,9 @@ examine the brains by changing transparency, to check registration.
 When finished checking, close the FSLVIEW window"
 
 
+scan_name=scan_name=encoding_l1_rep1
+subj_feat_dir=$sub_dir/$preproc_dir/${scan_name}_no_smooth.feat
+fsleyes $subj_feat_dir/reg/highres $subj_feat_dir/reg/example_func2highres -cm red-yellow -dr 1 30000
+fsleyes $subj_feat_dir/reg/standard $subj_feat_dir/reg/highres2standard $subj_feat_dir/reg/example_func2standard -cm red-yellow -dr 1 30000
 
 done
